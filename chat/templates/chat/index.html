@@ -1,0 +1,189 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Vizzy Chat — Your AI-powered creative companion for generating stunning visuals, artworks, posters, and more through conversation.">
+    <title>Vizzy Chat — AI Creative Studio</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{% static 'css/style.css' %}">
+</head>
+<body>
+    <div class="app">
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <div class="logo-icon">
+                        <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+                            <defs>
+                                <linearGradient id="logoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                                    <stop offset="0%" style="stop-color:#a855f7"/>
+                                    <stop offset="50%" style="stop-color:#6366f1"/>
+                                    <stop offset="100%" style="stop-color:#06b6d4"/>
+                                </linearGradient>
+                            </defs>
+                            <rect x="2" y="2" width="24" height="24" rx="8" fill="url(#logoGrad)" opacity="0.9"/>
+                            <path d="M9 14L12 17L19 10" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </div>
+                    <span class="logo-text">Vizzy Chat</span>
+                </div>
+                <button class="btn-icon sidebar-close" id="sidebarClose" title="Close sidebar">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M15 18l-6-6 6-6"/>
+                    </svg>
+                </button>
+            </div>
+
+            <button class="new-chat-btn" id="newChatBtn">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 5v14M5 12h14"/>
+                </svg>
+                New Chat
+            </button>
+
+            <div class="conversations-list" id="conversationsList">
+                <!-- Conversations populated by JS -->
+            </div>
+
+            <div class="sidebar-footer">
+                <div class="sidebar-footer-text">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" opacity="0.5">
+                        <circle cx="12" cy="12" r="10"/>
+                        <path d="M12 16v-4M12 8h.01"/>
+                    </svg>
+                    <span>AI-generated content is simulated</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Mobile sidebar overlay -->
+        <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+        <!-- Main Chat Area -->
+        <main class="main">
+            <!-- Header -->
+            <header class="chat-header">
+                <button class="btn-icon sidebar-toggle" id="sidebarToggle" title="Open sidebar">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 12h18M3 6h18M3 18h18"/>
+                    </svg>
+                </button>
+                <h1 class="chat-title" id="chatTitle">Vizzy Chat</h1>
+                <div class="header-actions">
+                    <button class="btn-icon" id="clearChatBtn" title="Delete conversation" style="display:none;">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
+                        </svg>
+                    </button>
+                </div>
+            </header>
+
+            <!-- Messages Area -->
+            <div class="messages-container" id="messagesContainer">
+                <!-- Welcome screen (shown when no conversation is active) -->
+                <div class="welcome-screen" id="welcomeScreen">
+                    <div class="welcome-icon">
+                        <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
+                            <defs>
+                                <linearGradient id="welcomeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                                    <stop offset="0%" style="stop-color:#a855f7"/>
+                                    <stop offset="50%" style="stop-color:#6366f1"/>
+                                    <stop offset="100%" style="stop-color:#06b6d4"/>
+                                </linearGradient>
+                            </defs>
+                            <rect x="4" y="4" width="56" height="56" rx="16" fill="url(#welcomeGrad)" opacity="0.15"/>
+                            <rect x="12" y="12" width="40" height="40" rx="12" fill="url(#welcomeGrad)" opacity="0.3"/>
+                            <path d="M24 32L29 37L40 26" stroke="url(#welcomeGrad)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </div>
+                    <h2 class="welcome-title">Welcome to Vizzy Chat</h2>
+                    <p class="welcome-subtitle">Your AI-powered creative studio. Tell me what you'd like to create.</p>
+
+                    <div class="suggestions-grid">
+                        <button class="suggestion-card" onclick="useSuggestion(this)">
+                            <div class="suggestion-icon">🎨</div>
+                            <span>Paint something that feels like how my last year felt</span>
+                        </button>
+                        <button class="suggestion-card" onclick="useSuggestion(this)">
+                            <div class="suggestion-icon">🖼️</div>
+                            <span>Turn this photo into a renaissance-style artwork</span>
+                        </button>
+                        <button class="suggestion-card" onclick="useSuggestion(this)">
+                            <div class="suggestion-icon">📋</div>
+                            <span>Create a sale poster that doesn't feel cheap</span>
+                        </button>
+                        <button class="suggestion-card" onclick="useSuggestion(this)">
+                            <div class="suggestion-icon">🌙</div>
+                            <span>Show me my inner emotional landscape right now</span>
+                        </button>
+                        <button class="suggestion-card" onclick="useSuggestion(this)">
+                            <div class="suggestion-icon">📖</div>
+                            <span>Generate a story for my kids, then visualize it scene by scene</span>
+                        </button>
+                        <button class="suggestion-card" onclick="useSuggestion(this)">
+                            <div class="suggestion-icon">✨</div>
+                            <span>Design premium-looking visuals for a product launch</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Messages will be rendered here -->
+                <div class="messages" id="messages" style="display:none;">
+                </div>
+
+                <!-- Typing indicator -->
+                <div class="typing-indicator" id="typingIndicator" style="display:none;">
+                    <div class="typing-avatar">
+                        <svg width="20" height="20" viewBox="0 0 28 28" fill="none">
+                            <rect x="2" y="2" width="24" height="24" rx="8" fill="url(#logoGrad)" opacity="0.9"/>
+                            <path d="M9 14L12 17L19 10" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </div>
+                    <div class="typing-dots">
+                        <span></span><span></span><span></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Input Area -->
+            <div class="input-area">
+                <div class="input-container">
+                    <textarea
+                        id="messageInput"
+                        placeholder="Describe what you'd like to create..."
+                        rows="1"
+                        autocomplete="off"
+                    ></textarea>
+                    <button class="send-btn" id="sendBtn" disabled title="Send message">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+                        </svg>
+                    </button>
+                </div>
+                <p class="input-hint">Vizzy Chat generates AI-powered creative content. Results are simulated for demonstration.</p>
+            </div>
+        </main>
+    </div>
+
+    <!-- Image lightbox modal -->
+    <div class="lightbox" id="lightbox" style="display:none;">
+        <div class="lightbox-overlay" onclick="closeLightbox()"></div>
+        <div class="lightbox-content">
+            <button class="lightbox-close" onclick="closeLightbox()">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M18 6L6 18M6 6l12 12"/>
+                </svg>
+            </button>
+            <img id="lightboxImage" src="" alt="Full size preview">
+            <p class="lightbox-caption" id="lightboxCaption"></p>
+        </div>
+    </div>
+
+    <script src="{% static 'js/app.js' %}"></script>
+</body>
+</html>
