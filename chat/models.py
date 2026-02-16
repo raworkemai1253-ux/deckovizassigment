@@ -1,5 +1,6 @@
 import uuid
 from django.db import models
+from django.conf import settings
 from django.utils import timezone
 
 
@@ -9,6 +10,10 @@ class Conversation(models.Model):
     Groups messages together and stores user context for personalization.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name='conversations', null=True, blank=True
+    )
     title = models.CharField(max_length=255, default="New Chat")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -55,6 +60,8 @@ class Message(models.Model):
     message_type = models.CharField(
         max_length=25, choices=MESSAGE_TYPE_CHOICES, default='text'
     )
+    # Field to store user-uploaded images for editing/vision tasks
+    image = models.ImageField(upload_to='uploads/%Y/%m/%d/', blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

@@ -22,6 +22,8 @@ import uuid
 import base64
 from datetime import datetime
 from pathlib import Path
+import requests
+import io
 
 from django.conf import settings
 from django.core.files.base import ContentFile
@@ -65,6 +67,7 @@ INTENT_MAP = {
     'image_generation': [
         'paint', 'draw', 'create', 'generate', 'make', 'imagine', 'design',
         'sketch', 'illustrate', 'render', 'visualize', 'show me',
+        'image', 'photo', 'picture', 'pic',
     ],
     'image_transformation': [
         'transform', 'turn this', 'convert', 'reimagine', 'restyle',
@@ -220,6 +223,43 @@ def _generate_gemini_response(message_text, intent):
         return None
 
 
+
+
+
+# ---------------------------------------------------------------------------
+# Hugging Face Image Generation (Fallback)
+# ---------------------------------------------------------------------------
+def _generate_huggingface_image(prompt):
+    """Generate image using Hugging Face Inference API (Stable Diffusion XL)."""
+    if not settings.HUGGINGFACE_API_KEY:
+        return None
+
+    api_url = "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-xl-base-1.0"
+    headers = {"Authorization": f"Bearer {settings.HUGGINGFACE_API_KEY}"}
+
+    try:
+        print(f"DEBUG: Requesting Hugging Face Image: {prompt[:50]}...")
+        response = requests.post(api_url, headers=headers, json={"inputs": prompt})
+        
+        if response.status_code == 200:
+            image_bytes = response.content
+            # Verify if it's an image (sometimes they return JSON error with 200?)
+            # Usually 200 is image bytes.
+            filename = f"generated/{uuid.uuid4()}.png"
+            image_content = ContentFile(image_bytes)
+            saved_path = default_storage.save(filename, image_content)
+            return default_storage.url(saved_path)
+        else:
+            print(f"DEBUG: Hugging Face Error: {response.status_code} - {response.text}")
+            logger.error(f"Hugging Face Error: {response.status_code} - {response.text}")
+            return None
+
+    except Exception as e:
+        print(f"DEBUG: Hugging Face Exception: {e}")
+        logger.error(f"Hugging Face Exception: {e}")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Imagen Image Generation
 # ---------------------------------------------------------------------------
@@ -241,8 +281,9 @@ def _generate_imagen_images_batch(prompt, count=1, aspect_ratio='1:1'):
             person_generation="ALLOW_ADULT",
         )
 
+        # Use standard Imagen 3.0 model
         response = _client.models.generate_images(
-            model='imagen-4.0-generate-001',
+            model='imagen-3.0-generate-001',
             prompt=prompt,
             config=config
         )
@@ -283,13 +324,85 @@ def _generate_imagen_images_batch(prompt, count=1, aspect_ratio='1:1'):
         return saved_urls
 
     except Exception as e:
-        print(f"DEBUG: Imagen API error: {e}")
-        logger.error(f"Imagen API error: {e}")
+        error_msg = str(e)
+        if "400" in error_msg or "404" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+             print("DEBUG: Real image generation unavailable (Billing/Quota/Model). using Mock Images.")
+             logger.warning(f"Imagen unavailable: {e}. Falling back to mock images.")
+        else:
+             print(f"DEBUG: Imagen API error: {e}")
+             logger.error(f"Imagen API error: {e}")
         return []
 
 
-def _generate_real_content_items(intent, message_text):
-    """Generate REAL content items using Imagen 3."""
+def _edit_huggingface_image(image_file, prompt):
+    """
+    Edit an image using Hugging Face Inference API (InstructPix2Pix).
+    """
+    if not settings.HUGGINGFACE_API_KEY:
+        return None
+
+    api_url = "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-xl-base-1.0"
+    headers = {"Authorization": f"Bearer {settings.HUGGINGFACE_API_KEY}"}
+
+    try:
+        print(f"DEBUG: Requesting Image Edit: {prompt[:50]}...")
+        
+        # Encode image to base64
+        image_file.seek(0)
+        img_bytes = image_file.read()
+        b64_img = base64.b64encode(img_bytes).decode('utf-8')
+        
+        # Construct payload for img2img
+        payload = {
+            "inputs": b64_img,
+            "parameters": {
+                "prompt": prompt,
+                "negative_prompt": "blurry, low quality, distorted",
+                "strength": 0.7  # Balance between original and prompt
+            }
+        }
+
+        print(f"DEBUG: Sending img2img request to {api_url}...")
+        response = requests.post(api_url, headers=headers, json=payload)
+
+        if response.status_code == 200:
+            image_bytes = response.content
+            filename = f"generated/edited_{uuid.uuid4()}.png"
+            image_content = ContentFile(image_bytes)
+            saved_path = default_storage.save(filename, image_content)
+            return default_storage.url(saved_path)
+        else:
+            print(f"DEBUG: Hugging Face Edit Error: {response.status_code} - {response.text}")
+            logger.error(f"Hugging Face Edit Error: {response.status_code} - {response.text}")
+            return None
+
+    except Exception as e:
+        print(f"DEBUG: Hugging Face Edit Exception: {e}")
+        logger.error(f"Hugging Face Edit Exception: {e}")
+        return None
+
+
+def _generate_real_content_items(intent, message_text, image_file=None):
+    """Generate REAL content items using Imagen 3 or Hugging Face."""
+    
+    # Handle Image Editing (Transformation)
+    if intent == 'image_transformation' and image_file:
+         print("DEBUG: Processing Image Transformation...")
+         edited_url = _edit_huggingface_image(image_file, message_text)
+         
+         if edited_url:
+             return [{
+                 'content_type': 'photo',
+                 'title': 'AI Edited Image',
+                 'description': f"Edited based on: {message_text}",
+                 'image_url': edited_url,
+                 'prompt_used': message_text,
+             }]
+         else:
+             print("DEBUG: Image editing failed.")
+             # Fallback to mock?
+             pass
+
     if intent == 'text_only':
         return []
 
@@ -321,13 +434,30 @@ def _generate_real_content_items(intent, message_text):
     enhanced_prompt = f"{message_text}, {style} style, high quality, detailed, {content_type}"
     
     image_urls = _generate_imagen_images_batch(enhanced_prompt, count=count, aspect_ratio=aspect_ratio)
-    
+
+    if not image_urls and settings.HUGGINGFACE_API_KEY:
+        print("DEBUG: Google Imagen failed/unavailable. Falling back to Hugging Face...")
+        # Generate images one by one for HF
+        for i in range(count):
+             # Add variation if multiple
+             prompt_var = enhanced_prompt
+             if i > 0: prompt_var += f", {random.choice(['different angle', 'variation'])}"
+             
+             url = _generate_huggingface_image(prompt_var)
+             if url:
+                 image_urls.append(url)
+             else:
+                 # If HF fails once, maybe stop? or continue?
+                 # HF free tier has rate limits.
+                 # Let's try to get at least one.
+                 pass
+
     items = []
     for url in image_urls:
          items.append({
                 'content_type': content_type,
                 'title': f"{content_type.title()} — {style.title()}",
-                'description': f"Generated with Imagen 3. Prompt: {enhanced_prompt}",
+                'description': f"Generated with AI. Prompt: {enhanced_prompt}",
                 'image_url': url,
                 'prompt_used': enhanced_prompt,
             })
@@ -407,27 +537,26 @@ def _build_mock_response_text(intent, message_text, content_count):
 # ---------------------------------------------------------------------------
 # Main Entry Point
 # ---------------------------------------------------------------------------
-def generate_response(message_text, conversation_context=None):
+def generate_response(message_text, conversation_context=None, image_file=None):
     """
-    Generate response using Gemini (Text) + Imagen (Images).
+    Generate response using Gemini (Text) + Imagen (Images) or Hugging Face.
     Falls back to mock if API key is missing or calls fail.
     """
-    intent, confidence = classify_intent(message_text)
+    if image_file:
+        intent = 'image_transformation'
+        confidence = 1.0
+    else:
+        intent, confidence = classify_intent(message_text)
     
     content_items = []
     response_text = None
 
-    # 1. Generate Images (so we know count/results for text description)
-    # Actually, let's do text first or concurrently? Text often refers to images.
-    # But usually text says "Here is what I made...".
+    # 1. Generate Images/Edits (so we know count/results for text description)
     
-    # Let's generate images first if needed, so we can tell text "I made X images".
-    # But current text prompt doesn't take image count. It just says "describe what you created".
-    # Let's stick to parallel.
-    
-    # Generate Images (if client available)
-    if _client and intent != 'text_only':
-        content_items = _generate_real_content_items(intent, message_text)
+    # Generate Images (if client available or HF key)
+    # We check _client OR settings.HUGGINGFACE_API_KEY for edits
+    if (_client or settings.HUGGINGFACE_API_KEY) and intent != 'text_only':
+        content_items = _generate_real_content_items(intent, message_text, image_file=image_file)
     
     # Fallback to Mock Images
     if not content_items and intent != 'text_only':
@@ -438,7 +567,10 @@ def generate_response(message_text, conversation_context=None):
     
     # Generate Text
     if _client:
-        response_text = _generate_gemini_response(message_text, intent)
+        text_prompt = message_text
+        if image_file:
+            text_prompt = f"[User uploaded an image for editing] {message_text}"
+        response_text = _generate_gemini_response(text_prompt, intent)
     
     # Fallback for Text
     if not response_text:

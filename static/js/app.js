@@ -29,6 +29,11 @@ const messagesEl = document.getElementById('messages');
 const typingIndicator = document.getElementById('typingIndicator');
 const messageInput = document.getElementById('messageInput');
 const sendBtn = document.getElementById('sendBtn');
+const imageInput = document.getElementById('imageInput');
+const uploadBtn = document.getElementById('uploadBtn');
+const imagePreview = document.getElementById('imagePreview');
+const previewImg = document.getElementById('previewImg');
+const previewClose = document.getElementById('previewClose');
 
 // ─── API Helpers ──────────────────────────────────────────────────────────
 async function api(url, options = {}) {
@@ -262,10 +267,38 @@ function escapeForTemplate(str) {
     return str.replace(/`/g, '\\`').replace(/\$/g, '\\$').replace(/\\/g, '\\\\');
 }
 
+
+// ─── Image Upload ────────────────────────────────────────────────────────
+uploadBtn.addEventListener('click', () => imageInput.click());
+
+imageInput.addEventListener('change', () => {
+    const file = imageInput.files[0];
+    if (file) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            previewImg.src = e.target.result;
+            imagePreview.style.display = 'flex';
+            sendBtn.disabled = false;
+        };
+        reader.readAsDataURL(file);
+    }
+});
+
+previewClose.addEventListener('click', () => {
+    imageInput.value = '';
+    imagePreview.style.display = 'none';
+    previewImg.src = '';
+    if (messageInput.value.trim().length === 0) {
+        sendBtn.disabled = true;
+    }
+});
+
 // ─── Sending Messages ────────────────────────────────────────────────────
 async function sendMessage() {
     const content = messageInput.value.trim();
-    if (!content || isLoading) return;
+    const imageFile = imageInput.files[0];
+
+    if ((!content && !imageFile) || isLoading) return;
 
     // Create conversation if needed
     if (!currentConversationId) {
@@ -286,6 +319,14 @@ async function sendMessage() {
     // Clear input
     messageInput.value = '';
     messageInput.style.height = 'auto';
+
+    // Clear image
+    if (imageFile) {
+        imageInput.value = '';
+        imagePreview.style.display = 'none';
+        previewImg.src = '';
+    }
+
     sendBtn.disabled = true;
     isLoading = true;
 
@@ -293,7 +334,7 @@ async function sendMessage() {
     const tempUserMsg = {
         id: 'temp-user',
         role: 'user',
-        content: content,
+        content: content || (imageFile ? '[Image Uploaded]' : ''),
         generated_contents: [],
     };
     appendMessage(tempUserMsg);
@@ -304,13 +345,31 @@ async function sendMessage() {
     scrollToBottom();
 
     try {
-        const data = await api('/api/messages/', {
-            method: 'POST',
-            body: JSON.stringify({
-                conversation_id: currentConversationId,
-                content: content,
-            }),
-        });
+        let data;
+        if (imageFile) {
+            const formData = new FormData();
+            formData.append('conversation_id', currentConversationId);
+            formData.append('content', content);
+            formData.append('image', imageFile);
+
+            const response = await fetch('/api/messages/', {
+                method: 'POST',
+                body: formData,
+            });
+            if (!response.ok) {
+                const err = await response.json().catch(() => ({}));
+                throw new Error(err.error || `API error ${response.status}`);
+            }
+            data = await response.json();
+        } else {
+            data = await api('/api/messages/', {
+                method: 'POST',
+                body: JSON.stringify({
+                    conversation_id: currentConversationId,
+                    content: content,
+                }),
+            });
+        }
 
         // Remove temp user message and add real ones
         const tempEl = messagesEl.querySelector('[data-id="temp-user"]');

@@ -11,12 +11,70 @@ import json
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import get_object_or_404, render, redirect
+from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth.models import User
+from django.contrib.auth.decorators import login_required
 
 from .models import Conversation, Message, GeneratedContent
 from .services import generate_response
 
 
+# ---------------------------------------------------------------------------
+# Auth views
+# ---------------------------------------------------------------------------
+
+def login_view(request):
+    """Handle user login."""
+    if request.user.is_authenticated:
+        return redirect('index')
+    if request.method == 'POST':
+        username = request.POST.get('username', '').strip()
+        password = request.POST.get('password', '')
+        user = authenticate(request, username=username, password=password)
+        if user is not None:
+            login(request, user)
+            return redirect('index')
+        else:
+            return render(request, 'chat/login.html', {'error': 'Invalid username or password.'})
+    return render(request, 'chat/login.html')
+
+
+def register_view(request):
+    """Handle user registration."""
+    if request.user.is_authenticated:
+        return redirect('index')
+    if request.method == 'POST':
+        username = request.POST.get('username', '').strip()
+        email = request.POST.get('email', '').strip()
+        password1 = request.POST.get('password1', '')
+        password2 = request.POST.get('password2', '')
+        errors = []
+        if not username:
+            errors.append('Username is required.')
+        if len(password1) < 6:
+            errors.append('Password must be at least 6 characters.')
+        if password1 != password2:
+            errors.append('Passwords do not match.')
+        if User.objects.filter(username=username).exists():
+            errors.append('Username already taken.')
+        if errors:
+            return render(request, 'chat/register.html', {
+                'errors': errors, 'username': username, 'email': email
+            })
+        user = User.objects.create_user(username=username, email=email, password=password1)
+        login(request, user)
+        return redirect('index')
+    return render(request, 'chat/register.html')
+
+
+def logout_view(request):
+    """Log user out and redirect to login."""
+    logout(request)
+    return redirect('login')
+
+
+@login_required
 def index(request):
     """Serve the main chat UI."""
     return render(request, 'chat/index.html')
@@ -34,7 +92,7 @@ def conversation_list(request):
     POST /api/conversations/  → create new conversation
     """
     if request.method == 'GET':
-        conversations = Conversation.objects.all()
+        conversations = Conversation.objects.filter(user=request.user)
         data = [
             {
                 'id': str(c.id),
@@ -54,7 +112,7 @@ def conversation_list(request):
         body = {}
 
     title = body.get('title', 'New Chat')
-    conversation = Conversation.objects.create(title=title)
+    conversation = Conversation.objects.create(title=title, user=request.user)
 
     return JsonResponse({
         'id': str(conversation.id),
@@ -135,17 +193,26 @@ def send_message(request):
 
     Creates user message, generates AI response, returns both.
     """
-    try:
-        body = json.loads(request.body)
-    except json.JSONDecodeError:
-        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    # Handle both JSON and Multipart requests
+    conversation_id = None
+    content = ''
+    image_file = None
 
-    conversation_id = body.get('conversation_id')
-    content = body.get('content', '').strip()
+    if request.content_type.startswith('multipart/form-data'):
+        content = request.POST.get('content', '').strip()
+        conversation_id = request.POST.get('conversation_id')
+        image_file = request.FILES.get('image')
+    else:
+        try:
+            body = json.loads(request.body)
+        except json.JSONDecodeError:
+            return JsonResponse({'error': 'Invalid JSON'}, status=400)
+        content = body.get('content', '').strip()
+        conversation_id = body.get('conversation_id')
 
-    if not conversation_id or not content:
+    if not conversation_id or (not content and not image_file):
         return JsonResponse(
-            {'error': 'conversation_id and content are required'}, status=400
+            {'error': 'conversation_id and content (or image) are required'}, status=400
         )
 
     conversation = get_object_or_404(Conversation, id=conversation_id)
@@ -154,18 +221,20 @@ def send_message(request):
     user_message = Message.objects.create(
         conversation=conversation,
         role='user',
-        content=content,
-        message_type='text',
+        content=content if content else '[Image Uploaded]',
+        message_type='text' if not image_file else 'image_transformation',
+        image=image_file
     )
 
     # Auto-title conversation from first message
     if conversation.messages.filter(role='user').count() == 1:
-        title = content[:50] + ('...' if len(content) > 50 else '')
+        title_text = content if content else 'Image Upload'
+        title = title_text[:50] + ('...' if len(title_text) > 50 else '')
         conversation.title = title
         conversation.save()
 
     # Generate AI response
-    ai_result = generate_response(content)
+    ai_result = generate_response(content, image_file=user_message.image if image_file else None)
 
     assistant_message = Message.objects.create(
         conversation=conversation,
