@@ -9,7 +9,7 @@ This module provides the AI creative engine that:
 
 When GEMINI_API_KEY is set in .env:
 - Text: Uses gemini-2.0-flash (or fallback to 1.5)
-- Images: Uses imagen-3.0-generate-002
+- Images: Uses imagen-4.0-generate-001
 
 When not set, uses the mock keyword-based classifier with placeholder images.
 """
@@ -34,30 +34,35 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Initialize Google GenAI Client
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Initialize Google GenAI Client (Lazy Loaded)
+# ---------------------------------------------------------------------------
 _client = None
 
-try:
-    from google import genai
-    from google.genai import types
-
-    if settings.GEMINI_API_KEY:
-        try:
-            _client = genai.Client(api_key=settings.GEMINI_API_KEY)
-            print("DEBUG: Google GenAI Client initialized successfully.")
-            logger.info("Google GenAI Client initialized successfully.")
-        except Exception as e:
-            print(f"DEBUG: Failed to initialize GenAI Client: {e}")
-            logger.error(f"Failed to initialize GenAI Client: {e}")
-    else:
+def get_genai_client():
+    global _client
+    if _client:
+        return _client
+        
+    if not settings.GEMINI_API_KEY:
         print("DEBUG: No GEMINI_API_KEY set. Using mock AI service.")
         logger.info("No GEMINI_API_KEY set. Using mock AI service.")
+        return None
 
-except ImportError:
-    print("DEBUG: google-genai package not installed.")
-    logger.warning("google-genai package not installed. Using mock AI service.")
-except Exception as e:
-    print(f"DEBUG: General Error init GenAI: {e}")
-    logger.warning(f"Failed to initialize GenAI: {e}. Using mock AI service.")
+    try:
+        from google import genai
+        _client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        print("DEBUG: Google GenAI Client initialized successfully.")
+        logger.info("Google GenAI Client initialized successfully.")
+        return _client
+    except ImportError:
+        print("DEBUG: google-genai package not installed.")
+        logger.warning("google-genai package not installed. Using mock AI service.")
+        return None
+    except Exception as e:
+        print(f"DEBUG: Failed to initialize GenAI Client: {e}")
+        logger.error(f"Failed to initialize GenAI Client: {e}")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +114,8 @@ def classify_intent(message_text):
     Returns: (intent_type, confidence)
     """
     # 1. Try Gemini Classification if available
-    if _client:
+    client = get_genai_client()
+    if client:
         try:
             prompt = f"""
             Analyze the following user message and classify the intent into ONE of these categories:
@@ -130,13 +136,13 @@ def classify_intent(message_text):
             # Try 2.5-flash first, fallback to flash-latest
             model_name = 'gemini-2.5-flash'
             try:
-                response = _client.models.generate_content(
+                response = client.models.generate_content(
                     model=model_name,
                     contents=prompt
                 )
             except Exception:
                 model_name = 'gemini-flash-latest'
-                response = _client.models.generate_content(
+                response = client.models.generate_content(
                     model=model_name,
                     contents=prompt
                 )
@@ -192,7 +198,8 @@ Your goal is to be a versatile creative companion."""
 
 def _generate_gemini_response(message_text, intent):
     """Generate a text response using Google Gemini API."""
-    if not _client:
+    client = get_genai_client()
+    if not client:
         return None
 
     system_prompt = GEMINI_SYSTEM_PROMPT
@@ -203,7 +210,7 @@ def _generate_gemini_response(message_text, intent):
         # Try 2.5 first
         model_name = 'gemini-2.5-flash'
         try:
-            response = _client.models.generate_content(
+            response = client.models.generate_content(
                 model=model_name,
                 contents=f"{system_prompt}\n\nUser request: {message_text}"
             )
@@ -211,7 +218,7 @@ def _generate_gemini_response(message_text, intent):
         except Exception:
              # Fallback
              model_name = 'gemini-flash-latest'
-             response = _client.models.generate_content(
+             response = client.models.generate_content(
                 model=model_name,
                 contents=f"{system_prompt}\n\nUser request: {message_text}"
             )
@@ -268,7 +275,8 @@ def _generate_imagen_images_batch(prompt, count=1, aspect_ratio='1:1'):
     Generate multiple images using Google Imagen 3 via google-genai SDK.
     Returns a list of local URLs.
     """
-    if not _client:
+    client = get_genai_client()
+    if not client:
         return []
 
     try:
@@ -282,8 +290,18 @@ def _generate_imagen_images_batch(prompt, count=1, aspect_ratio='1:1'):
         )
 
         # Use standard Imagen 3.0 model
-        response = _client.models.generate_images(
-            model='imagen-3.0-generate-001',
+        from google.genai import types # Import here to avoid global import if possible/needed
+        
+        # Re-define config to ensure types is available
+        config = types.GenerateImagesConfig(
+            number_of_images=count,
+            aspect_ratio=aspect_ratio,
+            safety_filter_level="BLOCK_LOW_AND_ABOVE",
+            person_generation="ALLOW_ADULT",
+        )
+
+        response = client.models.generate_images(
+            model='imagen-4.0-generate-001',
             prompt=prompt,
             config=config
         )
@@ -555,7 +573,8 @@ def generate_response(message_text, conversation_context=None, image_file=None):
     
     # Generate Images (if client available or HF key)
     # We check _client OR settings.HUGGINGFACE_API_KEY for edits
-    if (_client or settings.HUGGINGFACE_API_KEY) and intent != 'text_only':
+    client = get_genai_client()
+    if (client or settings.HUGGINGFACE_API_KEY) and intent != 'text_only':
         content_items = _generate_real_content_items(intent, message_text, image_file=image_file)
     
     # Fallback to Mock Images
@@ -566,7 +585,7 @@ def generate_response(message_text, conversation_context=None, image_file=None):
         content_items = _generate_mock_content_items(intent, message_text)
     
     # Generate Text
-    if _client:
+    if client:
         text_prompt = message_text
         if image_file:
             text_prompt = f"[User uploaded an image for editing] {message_text}"

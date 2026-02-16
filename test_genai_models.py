@@ -18,7 +18,7 @@ try:
     print("\nTesting Image Generation...")
     # Use standard imagen-3.0-generate-001
     response = client.models.generate_images(
-        model='imagen-3.0-generate-001',
+        model='imagen-4.0-generate-001',
         prompt='A beautiful sunset over a robotic city',
     )
     if response.generated_images:
