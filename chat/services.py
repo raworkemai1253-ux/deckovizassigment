@@ -239,7 +239,7 @@ def _generate_huggingface_image(prompt):
 
     try:
         print(f"DEBUG: Requesting Hugging Face Image: {prompt[:50]}...")
-        response = requests.post(api_url, headers=headers, json={"inputs": prompt})
+        response = requests.post(api_url, headers=headers, json={"inputs": prompt}, timeout=90)
         
         if response.status_code == 200:
             image_bytes = response.content
@@ -363,7 +363,7 @@ def _edit_huggingface_image(image_file, prompt):
         }
 
         print(f"DEBUG: Sending img2img request to {api_url}...")
-        response = requests.post(api_url, headers=headers, json=payload)
+        response = requests.post(api_url, headers=headers, json=payload, timeout=90)
 
         if response.status_code == 200:
             image_bytes = response.content
