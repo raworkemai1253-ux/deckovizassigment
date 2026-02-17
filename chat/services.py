@@ -354,12 +354,13 @@ def _generate_nvidia_image_to_image(prompt, image_file):
 
 
 # ---------------------------------------------------------------------------
-# Replicate Video Generation
+# Replicate Video Generation (Direct HTTP API — no SDK needed)
 # ---------------------------------------------------------------------------
 def _generate_replicate_video(prompt):
     """
-    Generate video using Replicate API (minimax/video-01).
-    Falls back to other models if needed.
+    Generate video using Replicate HTTP API (minimax/video-01).
+    Uses direct HTTP calls instead of the replicate SDK to avoid
+    Pydantic V1 incompatibility with Python 3.14.
     Returns: URL to the saved video file, or None.
     """
     if not settings.REPLICATE_API_TOKEN:
@@ -367,72 +368,92 @@ def _generate_replicate_video(prompt):
         return None
 
     try:
-        import replicate
-        import urllib.request
+        import time as _time
 
-        os.environ["REPLICATE_API_TOKEN"] = settings.REPLICATE_API_TOKEN
+        api_token = settings.REPLICATE_API_TOKEN
+        headers = {
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": "application/json",
+            "Prefer": "wait",  # Tells Replicate to wait up to 60s before returning
+        }
 
         print(f"DEBUG: Replicate Video — generating for: '{prompt[:60]}'...")
 
-        # Try minimax/video-01 (fast, high quality)
-        try:
-            output = replicate.run(
-                "minimax/video-01",
-                input={
-                    "prompt": prompt,
-                    "prompt_optimizer": True,
-                }
-            )
-            print(f"DEBUG: Replicate Video — got response: {type(output)}")
-        except Exception as e1:
-            print(f"DEBUG: Replicate minimax failed: {e1}")
-            # Fallback to wan2.1
-            try:
-                output = replicate.run(
-                    "wan-ai/wan2.1-t2v-14b",
-                    input={
-                        "prompt": prompt,
-                        "num_frames": 81,
-                    }
-                )
-                print(f"DEBUG: Replicate wan2.1 — got response: {type(output)}")
-            except Exception as e2:
-                print(f"DEBUG: Replicate wan2.1 also failed: {e2}")
-                return None
+        # Step 1: Create prediction via HTTP API
+        create_url = "https://api.replicate.com/v1/models/minimax/video-01/predictions"
+        payload = {
+            "input": {
+                "prompt": prompt,
+                "prompt_optimizer": True,
+            }
+        }
 
-        # Handle output — Replicate returns a FileOutput URL or iterator
+        print(f"DEBUG: Replicate — creating prediction...")
+        resp = requests.post(create_url, headers=headers, json=payload, timeout=120)
+
+        if resp.status_code not in (200, 201):
+            print(f"DEBUG: Replicate create failed: {resp.status_code} - {resp.text[:200]}")
+            return None
+
+        prediction = resp.json()
+        pred_id = prediction.get("id")
+        status = prediction.get("status")
+        print(f"DEBUG: Replicate — prediction {pred_id}, status: {status}")
+
+        # Step 2: Poll for completion (if not already done via Prefer: wait)
+        poll_url = f"https://api.replicate.com/v1/predictions/{pred_id}"
+        poll_headers = {
+            "Authorization": f"Bearer {api_token}",
+        }
+
+        max_wait = 300  # 5 minutes max
+        waited = 0
+        while status not in ("succeeded", "failed", "canceled") and waited < max_wait:
+            _time.sleep(5)
+            waited += 5
+            poll_resp = requests.get(poll_url, headers=poll_headers, timeout=30)
+            if poll_resp.status_code == 200:
+                prediction = poll_resp.json()
+                status = prediction.get("status")
+                print(f"DEBUG: Replicate — polling... status: {status} ({waited}s)")
+            else:
+                print(f"DEBUG: Replicate poll error: {poll_resp.status_code}")
+                break
+
+        if status != "succeeded":
+            error = prediction.get("error", "Unknown error")
+            print(f"DEBUG: Replicate prediction failed: {status} — {error}")
+            return None
+
+        # Step 3: Get output URL
+        output = prediction.get("output")
         video_url = None
+
         if isinstance(output, str):
             video_url = output
-        elif hasattr(output, 'url'):
-            video_url = str(output.url)
-        elif hasattr(output, '__iter__'):
-            # Some models return an iterator of FileOutput objects
-            for item in output:
-                if hasattr(item, 'url'):
-                    video_url = str(item.url)
-                elif isinstance(item, str):
-                    video_url = item
-                break
-        
-        if not video_url:
-            video_url = str(output)
+        elif isinstance(output, list) and len(output) > 0:
+            video_url = output[0] if isinstance(output[0], str) else str(output[0])
+        elif isinstance(output, dict):
+            video_url = output.get("url") or output.get("video")
 
-        if not video_url or not video_url.startswith('http'):
-            print(f"DEBUG: Replicate Video — unexpected output: {output}")
+        if not video_url or not video_url.startswith("http"):
+            print(f"DEBUG: Replicate — unexpected output format: {output}")
             return None
 
         print(f"DEBUG: Replicate Video — downloading from: {video_url[:80]}...")
 
-        # Download and save locally
-        req = urllib.request.urlopen(video_url, timeout=60)
-        video_data = req.read()
-        
-        # Determine extension
-        ext = 'mp4'
-        if '.webm' in video_url:
-            ext = 'webm'
-        
+        # Step 4: Download and save locally
+        dl_resp = requests.get(video_url, timeout=120)
+        if dl_resp.status_code != 200:
+            print(f"DEBUG: Replicate download failed: {dl_resp.status_code}")
+            return None
+
+        video_data = dl_resp.content
+
+        ext = "mp4"
+        if ".webm" in video_url:
+            ext = "webm"
+
         filename = f"generated/replicate_video_{uuid.uuid4().hex[:8]}.{ext}"
         saved_path = default_storage.save(filename, ContentFile(video_data))
         local_url = f"{settings.MEDIA_URL}{saved_path}"

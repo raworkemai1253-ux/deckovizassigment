@@ -5,4 +5,3 @@ google-genai>=0.1
 requests>=2.31.0
 gunicorn>=21.2.0
 whitenoise>=6.5.0
-replicate>=1.0.0
