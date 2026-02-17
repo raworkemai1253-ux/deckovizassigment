@@ -13,6 +13,10 @@ services:
         sync: false
       - key: HUGGINGFACE_API_KEY
         sync: false
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: REPLICATE_API_TOKEN
+        sync: false
       - key: PYTHON_VERSION
         value: "3.11.6"
       - key: MALLOC_ARENA_MAX

@@ -112,7 +112,8 @@ def conversation_list(request):
         body = {}
 
     title = body.get('title', 'New Chat')
-    conversation = Conversation.objects.create(title=title, user=request.user)
+    user = request.user if request.user.is_authenticated else None
+    conversation = Conversation.objects.create(title=title, user=user)
 
     return JsonResponse({
         'id': str(conversation.id),
@@ -189,7 +190,7 @@ def conversation_detail(request, conversation_id):
 def send_message(request):
     """
     POST /api/messages/
-    Body: { "conversation_id": "...", "content": "..." }
+    Body: { "conversation_id": "...", "content": "...", "mode": "..." }
 
     Creates user message, generates AI response, returns both.
     """
@@ -197,11 +198,15 @@ def send_message(request):
     conversation_id = None
     content = ''
     image_file = None
+    mode = None
+    refinement_url = None
 
     if request.content_type.startswith('multipart/form-data'):
         content = request.POST.get('content', '').strip()
         conversation_id = request.POST.get('conversation_id')
+        mode = request.POST.get('mode')
         image_file = request.FILES.get('image')
+        refinement_url = request.POST.get('refinement_url')
     else:
         try:
             body = json.loads(request.body)
@@ -209,6 +214,8 @@ def send_message(request):
             return JsonResponse({'error': 'Invalid JSON'}, status=400)
         content = body.get('content', '').strip()
         conversation_id = body.get('conversation_id')
+        mode = body.get('mode')
+        refinement_url = body.get('refinement_url')
 
     if not conversation_id or (not content and not image_file):
         return JsonResponse(
@@ -233,8 +240,14 @@ def send_message(request):
         conversation.title = title
         conversation.save()
 
-    # Generate AI response
-    ai_result = generate_response(content, image_file=user_message.image if image_file else None)
+    # Generate AI response -- PASSING MODE + REFINEMENT
+    ai_result = generate_response(
+        content, 
+        conversation=conversation, 
+        image_file=user_message.image if image_file else None,
+        mode=mode,
+        refinement_url=refinement_url
+    )
 
     assistant_message = Message.objects.create(
         conversation=conversation,
@@ -313,7 +326,7 @@ def regenerate_message(request, message_id):
     assistant_message.generated_contents.all().delete()
 
     # Generate new response
-    ai_result = generate_response(user_message.content)
+    ai_result = generate_response(user_message.content, conversation=conversation)
 
     assistant_message.content = ai_result['response_text']
     assistant_message.message_type = ai_result['message_type']

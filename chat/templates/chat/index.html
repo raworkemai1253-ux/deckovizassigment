@@ -177,6 +177,20 @@
                     <img id="previewImg" src="" alt="Preview">
                     <button class="preview-close" id="previewClose">×</button>
                 </div>
+
+                <!-- Mode Selector -->
+                <div class="mode-selector">
+                    <button class="mode-btn active" data-mode="auto" title="Auto-detect">
+                        ✨ Auto
+                    </button>
+                    <button class="mode-btn" data-mode="image" title="Generate Image">
+                        🖼️ Image
+                    </button>
+                    <button class="mode-btn" data-mode="video" title="Generate Video Loop">
+                        🎥 Video
+                    </button>
+                </div>
+
                 <div class="input-container">
                     <input type="file" id="imageInput" accept="image/*" style="display:none">
                     <button class="btn-icon upload-btn" id="uploadBtn" title="Upload image">
@@ -186,8 +200,21 @@
                                 d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
                         </svg>
                     </button>
+
                     <textarea id="messageInput" placeholder="Describe what you'd like to create..." rows="1"
                         autocomplete="off"></textarea>
+
+                    <!-- Mic Button -->
+                    <button class="btn-icon mic-btn" id="micBtn" title="Speak">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                            <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                            <line x1="12" y1="19" x2="12" y2="23" />
+                            <line x1="8" y1="23" x2="16" y2="23" />
+                        </svg>
+                    </button>
+
                     <button class="send-btn" id="sendBtn" disabled title="Send message">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                             stroke-width="2">
@@ -205,11 +232,22 @@
     <div class="lightbox" id="lightbox" style="display:none;">
         <div class="lightbox-overlay" onclick="closeLightbox()"></div>
         <div class="lightbox-content">
-            <button class="lightbox-close" onclick="closeLightbox()">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M18 6L6 18M6 6l12 12" />
-                </svg>
-            </button>
+            <div class="lightbox-toolbar">
+                <button class="lightbox-btn"
+                    onclick="downloadImage(document.getElementById('lightboxImage').src, document.getElementById('lightboxCaption').textContent)"
+                    title="Download">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                </button>
+                <button class="lightbox-btn" onclick="closeLightbox()" title="Close">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 6L6 18M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
             <img id="lightboxImage" src="" alt="Full size preview">
             <p class="lightbox-caption" id="lightboxCaption"></p>
         </div>

@@ -24,6 +24,7 @@ from datetime import datetime
 from pathlib import Path
 import requests
 import io
+from PIL import Image, ImageDraw, ImageFont
 
 from django.conf import settings
 from django.core.files.base import ContentFile
@@ -33,9 +34,6 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Initialize Google GenAI Client
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# Initialize Google GenAI Client (Lazy Loaded)
 # ---------------------------------------------------------------------------
 _client = None
 
@@ -66,7 +64,7 @@ def get_genai_client():
 
 
 # ---------------------------------------------------------------------------
-# Intent classification keywords
+# Intent classification & Constants
 # ---------------------------------------------------------------------------
 INTENT_MAP = {
     'image_generation': [
@@ -96,7 +94,16 @@ INTENT_MAP = {
     ],
     'video_loop': [
         'video loop', 'animation', 'animated', 'motion', 'looping',
-        'cinematic',
+        'cinematic', 'video', 'movie', 'clip',
+    ],
+    'product_mockup': [
+        'mockup', 'mock up', 'product', 't-shirt', 'tshirt', 'mug',
+        'phone case', 'hoodie', 'merchandise', 'merch', 'put this on',
+        'place on', 'print on',
+    ],
+    'text_only': [
+        'text', 'chat', 'ask', 'question', 'write', 'poem', 'essay',
+        'story', 'script', 'code', 'explain', 'tell me', 'lyrics',
     ],
 }
 
@@ -125,7 +132,8 @@ def classify_intent(message_text):
             - vision_board (user wants a moodboard, collage, vision board)
             - brand_artwork (user wants logos, branding, marketing visuals)
             - story_sequence (user wants a storyboard, scene-by-scene visualization)
-            - video_loop (user wants an animation concept, video loop)
+            - video_loop (user wants an animation concept, video loop, movie, clip)
+            - product_mockup (user wants to place a design on a product like t-shirt, mug, phone case)
             - text_only (user just wants to chat, ask questions, write text, no visuals needed)
 
             User Message: "{message_text}"
@@ -163,16 +171,493 @@ def classify_intent(message_text):
     scores = {}
 
     for intent, keywords in INTENT_MAP.items():
-        score = sum(1 for kw in keywords if kw in text_lower)
+        # Weighted scoring: Video and Text keywords are more specific, so give them higher weight
+        weight = 2 if intent in ['video_loop', 'text_only'] else 1
+        score = sum(weight for kw in keywords if kw in text_lower)
+        
         if score > 0:
             scores[intent] = score
 
+    print(f"DEBUG: Intent Scores for '{message_text}': {scores}")
+
     if not scores:
         return 'text_only', 0.5
-
+    
     best_intent = max(scores, key=scores.get)
     confidence = min(scores[best_intent] / 3.0, 1.0)
     return best_intent, confidence
+
+
+# ---------------------------------------------------------------------------
+# NVIDIA NIM Generation (Prioritized)
+# ---------------------------------------------------------------------------
+def _generate_nvidia_text(prompt, system_prompt, history=None):
+    """Generate text using NVIDIA NIM (Llama 3 70B)."""
+    if not settings.NVIDIA_API_KEY:
+        return None
+
+    try:
+        url = "https://integrate.api.nvidia.com/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {settings.NVIDIA_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        # Build messages array with conversation history
+        messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": prompt})
+        
+        payload = {
+            "model": "meta/llama-3.3-70b-instruct",
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 1024
+        }
+        
+        print(f"DEBUG: Requesting NVIDIA Text: {prompt[:50]}... (history: {len(history) if history else 0} msgs)")
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data['choices'][0]['message']['content']
+        else:
+            print(f"DEBUG: NVIDIA Text Error: {response.status_code} - {response.text}")
+            return None
+
+    except Exception as e:
+        print(f"DEBUG: NVIDIA Text Exception: {e}")
+        return None
+
+
+def _generate_nvidia_image(prompt):
+    """Generate image using NVIDIA NIM (Stable Diffusion XL)."""
+    if not settings.NVIDIA_API_KEY:
+        return None
+
+    try:
+        url = "https://ai.api.nvidia.com/v1/genai/stabilityai/stable-diffusion-xl"
+        headers = {
+            "Authorization": f"Bearer {settings.NVIDIA_API_KEY}",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        payload = {
+            "text_prompts": [{"text": prompt}],
+            "cfg_scale": 7,
+            "seed": random.randint(0, 100000),
+            "sampler": "K_DPM_2_ANCESTRAL",
+            "steps": 25
+        }
+        
+        print(f"DEBUG: Requesting NVIDIA Image: {prompt[:50]}...")
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # SDXL NIM might return base64
+            artifacts = data.get('artifacts', [])
+            if artifacts:
+                image_b64 = artifacts[0].get('base64')
+                if image_b64:
+                    image_bytes = base64.b64decode(image_b64)
+                    filename = f"generated/nvidia_{uuid.uuid4()}.png"
+                    image_content = ContentFile(image_bytes)
+                    saved_path = default_storage.save(filename, image_content)
+                    return default_storage.url(saved_path)
+            
+            print(f"DEBUG: NVIDIA Image Response malformed: {data.keys()}")
+            return None
+        else:
+            print(f"DEBUG: NVIDIA Image Error: {response.status_code} - {response.text}")
+            return None
+
+    except Exception as e:
+        print(f"DEBUG: NVIDIA Image Exception: {e}")
+        return None
+
+
+def _generate_nvidia_image_to_image(prompt, image_file):
+    """
+    Generate image from image using NVIDIA NIM (SDXL Refiner/Img2Img).
+    """
+    if not settings.NVIDIA_API_KEY:
+        return None
+
+    try:
+        print(f"DEBUG: NVIDIA Img2Img - Processing base image...")
+        
+        # Process input image
+        # image_file is an UploadedFile object or similar from Django
+        image_data = image_file.read()
+        
+        # Resize to max 1024x1024 to fit API limits/costs and convert to base64
+        img = Image.open(io.BytesIO(image_data))
+        img = img.convert("RGB")
+        img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+        
+        buffered = io.BytesIO()
+        img.save(buffered, format="PNG")
+        img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+
+        url = "https://ai.api.nvidia.com/v1/genai/stabilityai/stable-diffusion-xl"
+        headers = {
+            "Authorization": f"Bearer {settings.NVIDIA_API_KEY}",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        
+        # Docs for SDXL usually take 'image' or 'init_image' for img2img
+        # NVIDIA NIM for SDXL might use the same endpoint with an 'image' payload
+        # or a specific parameters structure.
+        # Based on research, it often uses 'text_prompts' + 'image' (b64).
+        
+        payload = {
+            "text_prompts": [{"text": prompt}],
+            "image": f"data:image/png;base64,{img_b64}", # standard data URI format often required
+            "cfg_scale": 7,
+            "seed": random.randint(0, 100000),
+            "sampler": "K_DPM_2_ANCESTRAL",
+            "steps": 25,
+            "strength": 0.75 # How much to change the image (0.0 - 1.0)
+        }
+        
+        # Note: If pure 'stable-diffusion-xl' endpoint doesn't support img2img, 
+        # we might need to check specific docs. But typically standard SDXL endpoints do.
+        # If it fails, we'll see a specific error.
+        
+        print(f"DEBUG: Requesting NVIDIA Img2Img: {prompt[:50]}...")
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        
+        if response.status_code == 200:
+            data = response.json()
+            artifacts = data.get('artifacts', [])
+            if artifacts:
+                image_b64 = artifacts[0].get('base64')
+                if image_b64:
+                    image_bytes = base64.b64decode(image_b64)
+                    filename = f"generated/nvidia_img2img_{uuid.uuid4()}.png"
+                    image_content = ContentFile(image_bytes)
+                    saved_path = default_storage.save(filename, image_content)
+                    return default_storage.url(saved_path)
+            
+            print(f"DEBUG: NVIDIA Img2Img Response malformed: {data.keys()}")
+            return None
+        else:
+            print(f"DEBUG: NVIDIA Img2Img Error: {response.status_code} - {response.text}")
+            return None
+
+    except Exception as e:
+        print(f"DEBUG: NVIDIA Img2Img Exception: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Replicate Video Generation
+# ---------------------------------------------------------------------------
+def _generate_replicate_video(prompt):
+    """
+    Generate video using Replicate API (minimax/video-01).
+    Falls back to other models if needed.
+    Returns: URL to the saved video file, or None.
+    """
+    if not settings.REPLICATE_API_TOKEN:
+        print("DEBUG: Replicate API token not configured")
+        return None
+
+    try:
+        import replicate
+        import urllib.request
+
+        os.environ["REPLICATE_API_TOKEN"] = settings.REPLICATE_API_TOKEN
+
+        print(f"DEBUG: Replicate Video — generating for: '{prompt[:60]}'...")
+
+        # Try minimax/video-01 (fast, high quality)
+        try:
+            output = replicate.run(
+                "minimax/video-01",
+                input={
+                    "prompt": prompt,
+                    "prompt_optimizer": True,
+                }
+            )
+            print(f"DEBUG: Replicate Video — got response: {type(output)}")
+        except Exception as e1:
+            print(f"DEBUG: Replicate minimax failed: {e1}")
+            # Fallback to wan2.1
+            try:
+                output = replicate.run(
+                    "wan-ai/wan2.1-t2v-14b",
+                    input={
+                        "prompt": prompt,
+                        "num_frames": 81,
+                    }
+                )
+                print(f"DEBUG: Replicate wan2.1 — got response: {type(output)}")
+            except Exception as e2:
+                print(f"DEBUG: Replicate wan2.1 also failed: {e2}")
+                return None
+
+        # Handle output — Replicate returns a FileOutput URL or iterator
+        video_url = None
+        if isinstance(output, str):
+            video_url = output
+        elif hasattr(output, 'url'):
+            video_url = str(output.url)
+        elif hasattr(output, '__iter__'):
+            # Some models return an iterator of FileOutput objects
+            for item in output:
+                if hasattr(item, 'url'):
+                    video_url = str(item.url)
+                elif isinstance(item, str):
+                    video_url = item
+                break
+        
+        if not video_url:
+            video_url = str(output)
+
+        if not video_url or not video_url.startswith('http'):
+            print(f"DEBUG: Replicate Video — unexpected output: {output}")
+            return None
+
+        print(f"DEBUG: Replicate Video — downloading from: {video_url[:80]}...")
+
+        # Download and save locally
+        req = urllib.request.urlopen(video_url, timeout=60)
+        video_data = req.read()
+        
+        # Determine extension
+        ext = 'mp4'
+        if '.webm' in video_url:
+            ext = 'webm'
+        
+        filename = f"generated/replicate_video_{uuid.uuid4().hex[:8]}.{ext}"
+        saved_path = default_storage.save(filename, ContentFile(video_data))
+        local_url = f"{settings.MEDIA_URL}{saved_path}"
+        print(f"DEBUG: Replicate Video saved: {local_url}")
+        return local_url
+
+    except Exception as e:
+        print(f"DEBUG: Replicate Video Exception: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Product Mockup (Composite Approach)
+# ---------------------------------------------------------------------------
+def _generate_product_mockup(prompt, image_file):
+    """
+    Generate a product mockup by creating a base product image
+    and overlaying the uploaded design using PIL.
+    """
+    try:
+        # 1. Determine product type from prompt
+        prompt_lower = prompt.lower()
+        if any(w in prompt_lower for w in ['t-shirt', 'tshirt', 'shirt']):
+            product_type = 't-shirt'
+            base_prompt = 'a blank white t-shirt on a flat surface, studio lighting, product photography'
+            overlay_area = (0.25, 0.20, 0.75, 0.65)  # x1, y1, x2, y2 as fractions
+        elif any(w in prompt_lower for w in ['mug', 'cup']):
+            product_type = 'mug'
+            base_prompt = 'a blank white ceramic coffee mug, studio lighting, product photography'
+            overlay_area = (0.20, 0.25, 0.80, 0.75)
+        elif any(w in prompt_lower for w in ['phone', 'case']):
+            product_type = 'phone case'
+            base_prompt = 'a blank white phone case, studio lighting, product photography'
+            overlay_area = (0.15, 0.10, 0.85, 0.90)
+        elif any(w in prompt_lower for w in ['hoodie', 'sweater']):
+            product_type = 'hoodie'
+            base_prompt = 'a blank white hoodie on a flat surface, studio lighting, product photography'
+            overlay_area = (0.25, 0.20, 0.75, 0.60)
+        else:
+            product_type = 't-shirt'
+            base_prompt = 'a blank white t-shirt on a flat surface, studio lighting, product photography'
+            overlay_area = (0.25, 0.20, 0.75, 0.65)
+
+        print(f"DEBUG: Product mockup — type={product_type}")
+
+        # 2. Generate base product image
+        base_url = None
+        if settings.NVIDIA_API_KEY:
+            base_url = _generate_nvidia_image(base_prompt)
+        if not base_url:
+            base_url = _generate_pollinations_image(base_prompt)
+        if not base_url:
+            print("DEBUG: Could not generate base product image")
+            return None
+
+        # 3. Download base image
+        import urllib.request
+        if base_url.startswith('/media/'):
+            base_path = Path(settings.MEDIA_ROOT) / base_url.replace('/media/', '')
+            base_img = Image.open(base_path).convert('RGBA')
+        else:
+            req = urllib.request.urlopen(base_url, timeout=15)
+            base_img = Image.open(io.BytesIO(req.read())).convert('RGBA')
+
+        # 4. Load overlay (user's uploaded image)
+        image_file.seek(0)
+        overlay_img = Image.open(image_file).convert('RGBA')
+
+        # 5. Calculate overlay position
+        bw, bh = base_img.size
+        ox1, oy1, ox2, oy2 = overlay_area
+        target_w = int(bw * (ox2 - ox1))
+        target_h = int(bh * (oy2 - oy1))
+
+        # Resize overlay to fit target area, maintaining aspect ratio
+        overlay_img.thumbnail((target_w, target_h), Image.LANCZOS)
+        ow, oh = overlay_img.size
+
+        # Center within the target area
+        paste_x = int(bw * ox1) + (target_w - ow) // 2
+        paste_y = int(bh * oy1) + (target_h - oh) // 2
+
+        # 6. Composite
+        composite = base_img.copy()
+        # Reduce overlay opacity slightly for realism
+        overlay_with_alpha = overlay_img.copy()
+        alpha = overlay_with_alpha.split()[3]
+        alpha = alpha.point(lambda p: int(p * 0.85))
+        overlay_with_alpha.putalpha(alpha)
+        composite.paste(overlay_with_alpha, (paste_x, paste_y), overlay_with_alpha)
+
+        # 7. Save
+        composite_rgb = composite.convert('RGB')
+        buffer = io.BytesIO()
+        composite_rgb.save(buffer, format='JPEG', quality=90)
+        buffer.seek(0)
+
+        filename = f"mockups/mockup_{uuid.uuid4().hex[:8]}.jpg"
+        saved_path = default_storage.save(filename, ContentFile(buffer.read()))
+        url = f"{settings.MEDIA_URL}{saved_path}"
+        print(f"DEBUG: Product mockup saved: {url}")
+        return url
+
+    except Exception as e:
+        print(f"DEBUG: Product mockup error: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Context & Memory Management
+# ---------------------------------------------------------------------------
+def _update_user_context(conversation, message_text, intent):
+    """
+    Extract preference/style keywords from the message and update conversation context.
+    """
+    if not conversation:
+        return
+
+    # specific styles we want to remember
+    interesting_keywords = [
+        'minimalist', 'cyberpunk', 'watercolor', 'noir', 'vintage', 
+        'abstract', 'photorealistic', '3d render', 'flat design',
+        'apple-esque', 'premium', 'dark mode', 'pastel'
+    ]
+    
+    found_styles = [kw for kw in interesting_keywords if kw in message_text.lower()]
+    
+    if found_styles:
+        current_context = conversation.user_context or {}
+        # Update 'preferred_styles'
+        existing_styles = current_context.get('preferred_styles', [])
+        # Add new styles
+        updated_styles = list(set(existing_styles + found_styles))
+        current_context['preferred_styles'] = updated_styles
+        
+        conversation.user_context = current_context
+        conversation.save()
+        print(f"DEBUG: Updated User Context: {current_context}")
+
+
+def _get_context_prompt(conversation):
+    """Generate a prompt snippet based on user context."""
+    if not conversation or not conversation.user_context:
+        return ""
+    
+    context = conversation.user_context
+    styles = context.get('preferred_styles', [])
+    if styles:
+        return f"User prefers these styles: {', '.join(styles)}. Incorporate them if relevant."
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# GIF Generation
+# ---------------------------------------------------------------------------
+
+
+def _create_gif_from_images(image_urls, fps=2):
+    """
+    Download images from URLs and stitch them into a GIF.
+    Returns the URL of the generated GIF.
+    """
+    try:
+        frames = []
+        
+        for url in image_urls:
+            # Handle local or remote URLs
+            if url.startswith('/media/'):
+                # Local file
+                 # Ensure MEDIA_ROOT is a Path object or string
+                 media_root = Path(settings.MEDIA_ROOT)
+                 rel_path = url.replace('/media/', '').lstrip('/')
+                 path = media_root / rel_path
+                 
+                 if path.exists():
+                     try:
+                         img = Image.open(path)
+                         frames.append(img)
+                     except Exception:
+                         pass
+
+            elif url.startswith('http'):
+                # Download remote image
+                try:
+                    resp = requests.get(url, timeout=10)
+                    if resp.status_code == 200:
+                        img = Image.open(io.BytesIO(resp.content))
+                        frames.append(img)
+                except Exception:
+                    pass
+
+        if not frames:
+            return None
+
+        # Resize to match first frame
+        base_size = frames[0].size
+        resized_frames = [f.resize(base_size) for f in frames]
+
+        # Save GIF
+        blob = io.BytesIO()
+        resized_frames[0].save(
+            blob, 
+            format='GIF', 
+            save_all=True, 
+            append_images=resized_frames[1:], 
+            duration=500, # 500ms per frame
+            loop=0
+        )
+        
+        filename = f"generated/animation_{uuid.uuid4()}.gif"
+        gif_content = ContentFile(blob.getvalue())
+        saved_path = default_storage.save(filename, gif_content)
+        final_url = default_storage.url(saved_path)
+        return final_url
+
+    except Exception:
+        # Silently fail or log if needed, but for now we just return None
+        return None
+        print(f"DEBUG: GIF Generation failed: {e}")
+        logger.error(f"GIF Generation failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +670,8 @@ When the user asks you to create something, respond with:
 2. Mention the styles and moods you've explored
 3. Offer to iterate or refine
 
-Keep your tone warm, creative, and professional. Be concise."""
+Keep your tone warm, creative, and professional. Be concise.
+"""
 
 TEXT_ONLY_SYSTEM_PROMPT = """You are Vizzy, a creative AI assistant. 
 You can assign tasks like writing poems, stories, scripts, or answering questions.
@@ -196,7 +682,7 @@ If the user asks general questions, answer them helpfuly.
 Your goal is to be a versatile creative companion."""
 
 
-def _generate_gemini_response(message_text, intent):
+def _generate_gemini_response(message_text, intent, context_prompt="", history=None):
     """Generate a text response using Google Gemini API."""
     client = get_genai_client()
     if not client:
@@ -205,6 +691,17 @@ def _generate_gemini_response(message_text, intent):
     system_prompt = GEMINI_SYSTEM_PROMPT
     if intent == 'text_only':
         system_prompt = TEXT_ONLY_SYSTEM_PROMPT
+    
+    # Build conversation context from history
+    history_text = ""
+    if history:
+        history_text = "\n\nConversation history:\n"
+        for msg in history[-8:]:  # Last 8 messages max
+            role_label = "User" if msg['role'] == 'user' else "Assistant"
+            history_text += f"{role_label}: {msg['content'][:200]}\n"
+        history_text += "---\n"
+    
+    full_prompt = f"{system_prompt}\n\n{context_prompt}{history_text}\n\nUser request: {message_text}"
 
     try:
         # Try 2.5 first
@@ -212,7 +709,7 @@ def _generate_gemini_response(message_text, intent):
         try:
             response = client.models.generate_content(
                 model=model_name,
-                contents=f"{system_prompt}\n\nUser request: {message_text}"
+                contents=full_prompt
             )
             return response.text
         except Exception:
@@ -220,7 +717,7 @@ def _generate_gemini_response(message_text, intent):
              model_name = 'gemini-flash-latest'
              response = client.models.generate_content(
                 model=model_name,
-                contents=f"{system_prompt}\n\nUser request: {message_text}"
+                contents=full_prompt
             )
              return response.text
 
@@ -228,9 +725,6 @@ def _generate_gemini_response(message_text, intent):
         print(f"DEBUG: Gemini Text API error: {e}")
         logger.error(f"Gemini Text API error: {e}")
         return None
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -250,8 +744,6 @@ def _generate_huggingface_image(prompt):
         
         if response.status_code == 200:
             image_bytes = response.content
-            # Verify if it's an image (sometimes they return JSON error with 200?)
-            # Usually 200 is image bytes.
             filename = f"generated/{uuid.uuid4()}.png"
             image_content = ContentFile(image_bytes)
             saved_path = default_storage.save(filename, image_content)
@@ -282,17 +774,9 @@ def _generate_imagen_images_batch(prompt, count=1, aspect_ratio='1:1'):
     try:
         print(f"DEBUG: Generating {count} images with Imagen 3...")
         # Config for image generation
-        config = types.GenerateImagesConfig(
-            number_of_images=count,
-            aspect_ratio=aspect_ratio,
-            safety_filter_level="BLOCK_LOW_AND_ABOVE",
-            person_generation="ALLOW_ADULT",
-        )
-
         # Use standard Imagen 3.0 model
-        from google.genai import types # Import here to avoid global import if possible/needed
+        from google.genai import types 
         
-        # Re-define config to ensure types is available
         config = types.GenerateImagesConfig(
             number_of_images=count,
             aspect_ratio=aspect_ratio,
@@ -313,17 +797,7 @@ def _generate_imagen_images_batch(prompt, count=1, aspect_ratio='1:1'):
 
         saved_urls = []
         for img_obj in response.generated_images:
-            # Save the image
             filename = f"generated/{uuid.uuid4()}.png"
-            
-            # The image data is in img_obj.image.image_bytes usually
-            # SDK documentation says: response.generated_images[].image.image_bytes 
-            # or just img_obj.image_bytes depending on structure.
-            # Let's inspect slightly carefully or handle the PIL Image if it returns it.
-            # google-genai returns GeneratedImage which has 'image' attribute (PIL Image) or 'image_bytes'.
-            
-            # Check what we got. Assuming we get PIL Image property or bytes.
-            # According to SDK: response.generated_images[0].image is PIL.Image.Image if PIL installed.
             
             image_content = None
             if hasattr(img_obj, 'image') and img_obj.image:
@@ -342,13 +816,9 @@ def _generate_imagen_images_batch(prompt, count=1, aspect_ratio='1:1'):
         return saved_urls
 
     except Exception as e:
-        error_msg = str(e)
-        if "400" in error_msg or "404" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-             print("DEBUG: Real image generation unavailable (Billing/Quota/Model). using Mock Images.")
-             logger.warning(f"Imagen unavailable: {e}. Falling back to mock images.")
-        else:
-             print(f"DEBUG: Imagen API error: {e}")
-             logger.error(f"Imagen API error: {e}")
+        # Fallback handling
+        print(f"DEBUG: Imagen API error: {e}")
+        logger.error(f"Imagen API error: {e}")
         return []
 
 
@@ -359,24 +829,26 @@ def _edit_huggingface_image(image_file, prompt):
     if not settings.HUGGINGFACE_API_KEY:
         return None
 
-    api_url = "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-xl-base-1.0"
+    api_url = "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-xl-base-1.0" # SDXL isn't img2img edit strictly, but let's assume it works or swap to instruct-pix2pix
+    # Better model for editing: "timbrooks/instruct-pix2pix"
+    api_url = "https://router.huggingface.co/hf-inference/models/timbrooks/instruct-pix2pix"
+
     headers = {"Authorization": f"Bearer {settings.HUGGINGFACE_API_KEY}"}
 
     try:
         print(f"DEBUG: Requesting Image Edit: {prompt[:50]}...")
         
-        # Encode image to base64
         image_file.seek(0)
         img_bytes = image_file.read()
         b64_img = base64.b64encode(img_bytes).decode('utf-8')
         
-        # Construct payload for img2img
         payload = {
             "inputs": b64_img,
             "parameters": {
                 "prompt": prompt,
                 "negative_prompt": "blurry, low quality, distorted",
-                "strength": 0.7  # Balance between original and prompt
+                # instruct-pix2pix specific params
+                "image_guidance_scale": 1.5,
             }
         }
 
@@ -400,9 +872,61 @@ def _edit_huggingface_image(image_file, prompt):
         return None
 
 
-def _generate_real_content_items(intent, message_text, image_file=None):
+# ---------------------------------------------------------------------------
+# Pollinations AI Image Generation (Unlimited Fallback)
+# ---------------------------------------------------------------------------
+def _generate_pollinations_image(prompt):
+    """
+    Generate image using Pollinations.AI (Free, Unlimited).
+    """
+    try:
+        # URL encode the prompt
+        import urllib.parse
+        encoded_prompt = urllib.parse.quote(prompt)
+        
+        # Pollinations API: https://image.pollinations.ai/prompt/{prompt}
+        # We can add parameters like width, height, model, seed
+        # seed = random.randint(0, 10000)
+        # url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&nologo=true"
+        
+        api_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+        params = {
+            "width": 1024,
+            "height": 1024,
+            "nologo": "true",
+            "seed": random.randint(0, 50000),
+            "model": "flux" # or 'turbo'
+        }
+        
+        print(f"DEBUG: Requesting Pollinations Image: {prompt[:50]}...")
+        response = requests.get(api_url, params=params, timeout=60)
+
+        if response.status_code == 200:
+            image_bytes = response.content
+            filename = f"generated/pollinations_{uuid.uuid4()}.jpg"
+            image_content = ContentFile(image_bytes)
+            saved_path = default_storage.save(filename, image_content)
+            return default_storage.url(saved_path)
+        else:
+            print(f"DEBUG: Pollinations Error: {response.status_code}")
+            return None
+
+    except Exception as e:
+        print(f"DEBUG: Pollinations Exception: {e}")
+        logger.error(f"Pollinations Exception: {e}")
+        return None
+
+
+def _generate_real_content_items(intent, message_text, conversation=None, image_file=None):
     """Generate REAL content items using Imagen 3 or Hugging Face."""
     
+    # Context injection
+    context_style = ""
+    if conversation and conversation.user_context:
+        styles = conversation.user_context.get('preferred_styles', [])
+        if styles:
+            context_style = f", infusing styles: {', '.join(styles)}"
+
     # Handle Image Editing (Transformation)
     if intent == 'image_transformation' and image_file:
          print("DEBUG: Processing Image Transformation...")
@@ -418,23 +942,33 @@ def _generate_real_content_items(intent, message_text, image_file=None):
              }]
          else:
              print("DEBUG: Image editing failed.")
-             # Fallback to mock?
              pass
 
     if intent == 'text_only':
         return []
 
     # Determine number of images
-    count = 1  
-    if intent in ('vision_board', 'story_sequence'):
-        count = 2 # limited to 4 usually
+    # Default high for variety
+    count = 4
     
-    # Determine aspect ratio
+    # Determine aspect ratio details
     aspect_ratio = '1:1'
+    keyword_suffix = ""
+    
     if intent == 'poster_design':
         aspect_ratio = '3:4'
-    elif intent in ('brand_artwork', 'video_loop'):
+        keyword_suffix = ", poster design, typography, graphic design"
+    elif intent == 'brand_artwork':
         aspect_ratio = '16:9'
+        keyword_suffix = ", logo, vector art, minimal, professional branding"
+        if "apple" in message_text.lower():
+            keyword_suffix += ", apple-style, minimalist, sleek, white background, premium lighting"
+    elif intent == 'video_loop':
+        aspect_ratio = '16:9'
+        keyword_suffix = ", cinematic shot, movie scene, keyframe, detailed 8k"
+    elif intent == 'vision_board':
+        aspect_ratio = '1:1' # or 3:4
+        keyword_suffix = ", moodboard, collage, grid layout, aesthetic"
 
     content_type_map = {
         'image_generation': 'artwork',
@@ -443,39 +977,67 @@ def _generate_real_content_items(intent, message_text, image_file=None):
         'vision_board': 'vision_board',
         'brand_artwork': 'brand_asset',
         'story_sequence': 'artwork',
-        'video_loop': 'artwork',
+        'video_loop': 'video', # Special case
     }
     content_type = content_type_map.get(intent, 'image')
 
-    # Batch generation is efficient
+    # Batch generation
     style = random.choice(STYLES)
-    enhanced_prompt = f"{message_text}, {style} style, high quality, detailed, {content_type}"
+    enhanced_prompt = f"{message_text}, {style} style{context_style}{keyword_suffix}, high quality, detailed"
     
-    image_urls = _generate_imagen_images_batch(enhanced_prompt, count=count, aspect_ratio=aspect_ratio)
+    image_urls = []
 
+    # Priority: NVIDIA NIM -> Google Imagen -> Hugging Face -> Pollinations
+    if settings.NVIDIA_API_KEY:
+         print(f"DEBUG: Generating {count} images with NVIDIA NIM...")
+         for i in range(count):
+             prompt_var = enhanced_prompt + f" variation {i+1}"
+             url = _generate_nvidia_image(prompt_var)
+             if url:
+                 image_urls.append(url)
+    
+    if not image_urls:
+        image_urls = _generate_imagen_images_batch(enhanced_prompt, count=count, aspect_ratio=aspect_ratio)
+
+    # GIF Creation for Video Loop
+    if intent == 'video_loop' and len(image_urls) >= 2:
+        print("DEBUG: Generating GIF for video loop...")
+        gif_url = _create_gif_from_images(image_urls)
+        if gif_url:
+            # Return the GIF as the main item, maybe others as frames?
+            # For now, just return the GIF as a single "Video" item
+            return [{
+                'content_type': 'video',
+                'title': f"AI Generated Concept Loop",
+                'description': f"Animated GIF from concept frames. Style: {style}",
+                'image_url': gif_url,
+                'prompt_used': enhanced_prompt,
+            }]
+
+    # Fallback to HF if no images from Imagen
     if not image_urls and settings.HUGGINGFACE_API_KEY:
         print("DEBUG: Google Imagen failed/unavailable. Falling back to Hugging Face...")
-        # Generate images one by one for HF
-        for i in range(count):
-             # Add variation if multiple
-             prompt_var = enhanced_prompt
-             if i > 0: prompt_var += f", {random.choice(['different angle', 'variation'])}"
-             
+        for i in range(2): # limit fallback to 2
+             prompt_var = enhanced_prompt + f", variation {i+1}"
              url = _generate_huggingface_image(prompt_var)
              if url:
                  image_urls.append(url)
-             else:
-                 # If HF fails once, maybe stop? or continue?
-                 # HF free tier has rate limits.
-                 # Let's try to get at least one.
-                 pass
+
+    # Final Fallback to Pollinations AI (Unlimited)
+    if not image_urls:
+        print("DEBUG: Hugging Face failed/unavailable. Falling back to Pollinations AI...")
+        for i in range(count): # Generates requested count (usually 4)
+             prompt_var = enhanced_prompt + f" variation {i+1}"
+             url = _generate_pollinations_image(prompt_var)
+             if url:
+                 image_urls.append(url)
 
     items = []
     for url in image_urls:
          items.append({
                 'content_type': content_type,
                 'title': f"{content_type.title()} — {style.title()}",
-                'description': f"Generated with AI. Prompt: {enhanced_prompt}",
+                'description': f"Generated with AI.",
                 'image_url': url,
                 'prompt_used': enhanced_prompt,
             })
@@ -489,21 +1051,16 @@ def _generate_real_content_items(intent, message_text, image_file=None):
 def _generate_seed(text):
     return int(hashlib.md5(text.encode()).hexdigest()[:8], 16)
 
-
 def _get_placeholder_url(seed, width=800, height=600):
     img_id = (seed % 1000) + 1
     return f"https://picsum.photos/seed/{img_id}/{width}/{height}"
 
-
-def _generate_mock_content_items(intent, message_text, count=None):
+def _generate_mock_content_items(intent, message_text, count=4):
     """Generate mock content items with placeholder images."""
     if intent == 'text_only':
         return []
 
     seed = _generate_seed(message_text + str(datetime.now().timestamp()))
-
-    if count is None:
-        count = 2
 
     content_type_map = {
         'image_generation': 'artwork',
@@ -517,18 +1074,50 @@ def _generate_mock_content_items(intent, message_text, count=None):
     content_type = content_type_map.get(intent, 'image')
 
     items = []
+    
+    # Pre-generate URLs for GIF creation if needed
+    mock_urls = []
     for i in range(count):
-        style = random.choice(STYLES)
         item_seed = seed + i * 137
         w, h = 800, 600
         if intent == 'poster_design': w, h = 600, 900
         elif intent == 'vision_board': w, h = 400, 400
+        elif intent == 'video_loop': w, h = 1280, 720 # Cinematic aspect
 
+        mock_urls.append(_get_placeholder_url(item_seed, w, h))
+
+    # Handle Video Loop specifically for Mock
+    if intent == 'video_loop':
+        print("DEBUG: Generating Mock GIFs for video loop...")
+        video_items = []
+        for i in range(count):
+             # Generate a unique sequence for each video variant
+             variant_seed = seed + (i * 999)
+             variant_urls = []
+             for j in range(4): # 4 frames per video
+                 frame_seed = variant_seed + j
+                 variant_urls.append(_get_placeholder_url(frame_seed, 1280, 720))
+            
+             gif_url = _create_gif_from_images(variant_urls)
+             if gif_url:
+                 video_items.append({
+                    'content_type': 'video',
+                    'title': f"Concept Loop {i+1} (Mock)",
+                    'description': f"Variation {i+1}: Animated GIF from mock frames.",
+                    'image_url': gif_url,
+                    'prompt_used': f"[Mock Video Var {i+1}] {message_text}",
+                })
+        
+        if video_items:
+            return video_items
+
+    for i, url in enumerate(mock_urls):
+        style = random.choice(STYLES)
         items.append({
             'content_type': content_type,
             'title': f"{content_type.title()} — {style.title()} (Mock)",
-            'description': f"Mock generated image using picsum.photos.",
-            'image_url': _get_placeholder_url(item_seed, w, h),
+            'description': f"Mock generated image.",
+            'image_url': url,
             'prompt_used': f"[{style}] {message_text}",
         })
 
@@ -549,55 +1138,212 @@ def _build_mock_response_text(intent, message_text, content_count):
         f"Here are {content_count} creative interpretations.",
         f"I've generated {content_count} artworks for you.",
     ]
-    return random.choice(responses)
+    
+    base_response = random.choice(responses)
+    
+    # If the user wanted text (but got fallback), give them some options
+    if intent == 'story_sequence' or intent == 'brand_artwork':
+        base_response += "\n\n**Option 1:** A bold, modern approach focusing on minimalism.\n\n**Option 2:** A vibrant, energetic style with high contrast.\n\n**Option 3:** A sophisticated, premium look with subtle details."
+
+    return base_response
 
 
 # ---------------------------------------------------------------------------
 # Main Entry Point
 # ---------------------------------------------------------------------------
-def generate_response(message_text, conversation_context=None, image_file=None):
+def generate_response(message_text, conversation=None, image_file=None, mode=None, refinement_url=None):
     """
-    Generate response using Gemini (Text) + Imagen (Images) or Hugging Face.
-    Falls back to mock if API key is missing or calls fail.
+    Generate response using Gemini (Text) + Imagen (Images).
+    
+    Args:
+        message_text (str): User prompt
+        conversation (Conversation): Context
+        image_file (File): Uploaded image
+        mode (str): 'image', 'video' or None (auto)
+        refinement_url (str): URL of a previously generated image to refine
     """
-    if image_file:
+    
+    # 0. Determine Intent
+    # Detect short follow-ups like "yes", "more", "another" — use last message's intent
+    SHORT_FOLLOWUPS = {'yes', 'yeah', 'yep', 'sure', 'ok', 'okay', 'more', 'another', 
+                       'another one', 'do it', 'go ahead', 'please', 'continue', 'yes please',
+                       'one more', 'again', 'try again'}
+    is_short_followup = message_text.strip().lower().rstrip('.!') in SHORT_FOLLOWUPS
+    
+    if refinement_url:
+        intent = 'refinement'
+        confidence = 1.0
+    elif image_file:
         intent = 'image_transformation'
         confidence = 1.0
+    elif is_short_followup and conversation:
+        # Look at the last assistant message to determine what to continue
+        try:
+            last_assistant = conversation.messages.filter(role='assistant').order_by('-created_at').first()
+            if last_assistant and last_assistant.message_type != 'text':
+                intent = last_assistant.message_type
+                confidence = 0.9
+                print(f"DEBUG: Short follow-up detected — reusing last intent: {intent}")
+            else:
+                intent = 'text_only'
+                confidence = 0.85
+        except Exception:
+            intent = 'text_only'
+            confidence = 0.5
+    elif mode == 'video':
+        intent = 'video_loop'
+        confidence = 1.0
+    elif mode == 'image':
+        pred_intent, conf = classify_intent(message_text)
+        if pred_intent == 'text_only':
+            intent = 'image_generation'
+            confidence = 1.0
+        else:
+            intent = pred_intent
+            confidence = conf
     else:
         intent, confidence = classify_intent(message_text)
+    
+    print(f"DEBUG: Intent detected: {intent} (Mode: {mode}, Refinement: {bool(refinement_url)}, ShortFollowup: {is_short_followup})")
+
+    # 1. Update Context
+    if conversation:
+        _update_user_context(conversation, message_text, intent)
     
     content_items = []
     response_text = None
 
-    # 1. Generate Images/Edits (so we know count/results for text description)
-    
-    # Generate Images (if client available or HF key)
-    # We check _client OR settings.HUGGINGFACE_API_KEY for edits
+    # 2. Generate Content
     client = get_genai_client()
-    if (client or settings.HUGGINGFACE_API_KEY) and intent != 'text_only':
-        content_items = _generate_real_content_items(intent, message_text, image_file=image_file)
     
-    # Fallback to Mock Images
+    # [REFINEMENT] User selected a previously generated image and wants to modify it
+    if intent == 'refinement' and refinement_url:
+        print(f"DEBUG: Refinement mode — downloading selected image from {refinement_url}")
+        try:
+            # Download the selected image from local media storage
+            from pathlib import Path
+            from django.core.files.uploadedfile import SimpleUploadedFile
+            
+            rel_path = refinement_url.replace(settings.MEDIA_URL, '').lstrip('/')
+            media_root = Path(settings.MEDIA_ROOT)
+            file_path = media_root / rel_path
+            
+            if file_path.exists():
+                with open(file_path, 'rb') as f:
+                    image_data = f.read()
+                
+                # Create a file-like object for the img2img function
+                fake_file = SimpleUploadedFile(
+                    name=file_path.name,
+                    content=image_data,
+                    content_type='image/png'
+                )
+                
+                # Try NVIDIA img2img first
+                if settings.NVIDIA_API_KEY:
+                    print(f"DEBUG: Refining with NVIDIA SDXL img2img...")
+                    img_url = _generate_nvidia_image_to_image(message_text, fake_file)
+                    if img_url:
+                        content_items.append({
+                            'content_type': 'image_generation',
+                            'title': f"Refined Image",
+                            'description': f"Refined: {message_text[:80]}",
+                            'image_url': img_url,
+                            'prompt_used': message_text,
+                        })
+                
+                # Fallback: generate a new image with the combined prompt
+                if not content_items:
+                    print(f"DEBUG: Refinement fallback — generating new image with merged prompt")
+                    merged_prompt = f"{message_text}. Based on a previous image."
+                    content_items = _generate_real_content_items('image_generation', merged_prompt, conversation, None)
+            else:
+                print(f"DEBUG: Refinement image not found at {file_path}")
+        except Exception as e:
+            print(f"DEBUG: Refinement error: {e}")
+    
+    # [VIDEO GENERATION via Replicate]
+    elif intent == 'video_loop' and settings.REPLICATE_API_TOKEN:
+        print(f"DEBUG: Generating Video with Replicate...")
+        video_url = _generate_replicate_video(message_text)
+        if video_url:
+             content_items.append({
+                'content_type': 'video',
+                'title': "AI Video",
+                'description': f"Generated video: {message_text[:60]}",
+                'image_url': video_url,
+                'prompt_used': message_text,
+            })
+    
+    # [NVIDIA Image-to-Image (SDXL)]
+    elif intent == 'image_transformation' and settings.NVIDIA_API_KEY and image_file:
+         print(f"DEBUG: Transforming Image with NVIDIA SDXL...")
+         img_url = _generate_nvidia_image_to_image(message_text, image_file)
+         if img_url:
+             content_items.append({
+                'content_type': 'image_transformation',
+                'title': "Remixed Image — SDXL",
+                'description': "Transformed using NVIDIA Stable Diffusion XL.",
+                'image_url': img_url,
+                'prompt_used': message_text,
+            })
+
+    # [PRODUCT MOCKUP] Composite: generate base product + overlay uploaded design
+    elif intent == 'product_mockup' and image_file:
+        print(f"DEBUG: Creating product mockup...")
+        mockup_url = _generate_product_mockup(message_text, image_file)
+        if mockup_url:
+            content_items.append({
+                'content_type': 'image_generation',
+                'title': f"Product Mockup",
+                'description': f"Your design placed on a product.",
+                'image_url': mockup_url,
+                'prompt_used': message_text,
+            })
+
+    if not content_items and (client or settings.HUGGINGFACE_API_KEY or settings.NVIDIA_API_KEY) and intent != 'text_only':
+        content_items = _generate_real_content_items(intent, message_text, conversation, image_file)
+    
+    # Fallback/Mock
     if not content_items and intent != 'text_only':
-        # If real generation failed (or client missing), use mock
-        # We check _client again inside mock? No.
-        # Just use mock if items are empty and intent is visual.
         content_items = _generate_mock_content_items(intent, message_text)
     
-    # Generate Text
-    if client:
+    # 3. Generate Text Response
+    # Build conversation history for context
+    chat_history = None
+    if conversation:
+        try:
+            recent_msgs = conversation.messages.order_by('-created_at')[:10]
+            chat_history = []
+            for m in reversed(list(recent_msgs)):
+                chat_history.append({
+                    'role': 'user' if m.role == 'user' else 'assistant',
+                    'content': m.content[:300]
+                })
+        except Exception as e:
+            print(f"DEBUG: Could not load history: {e}")
+    
+    if client or settings.NVIDIA_API_KEY:
         text_prompt = message_text
         if image_file:
             text_prompt = f"[User uploaded an image for editing] {message_text}"
-        response_text = _generate_gemini_response(text_prompt, intent)
+        
+        context_prompt = _get_context_prompt(conversation)
+        
+        # Priority: NVIDIA -> Gemini -> Mock
+        if settings.NVIDIA_API_KEY:
+            system_prompt = GEMINI_SYSTEM_PROMPT if intent != 'text_only' else TEXT_ONLY_SYSTEM_PROMPT
+            response_text = _generate_nvidia_text(text_prompt, system_prompt, history=chat_history)
+
+        if not response_text and client:
+            response_text = _generate_gemini_response(text_prompt, intent, context_prompt, history=chat_history)
     
-    # Fallback for Text
     if not response_text:
         response_text = _build_mock_response_text(intent, message_text, len(content_items))
 
     return {
         'intent': intent,
-        'confidence': confidence,
+        'confidence': confidence or 1.0,
         'response_text': response_text,
         'content_items': content_items,
         'message_type': intent,

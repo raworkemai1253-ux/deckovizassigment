@@ -35,7 +35,23 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
 # Hugging Face API Key
 HUGGINGFACE_API_KEY = os.getenv('HUGGINGFACE_API_KEY', '')
 
+# NVIDIA API Key
+NVIDIA_API_KEY = os.getenv('NVIDIA_API_KEY', '')
+
+# Replicate API Token (for video generation)
+REPLICATE_API_TOKEN = os.getenv('REPLICATE_API_TOKEN', '')
+
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
+
+# Render sets RENDER_EXTERNAL_HOSTNAME
+RENDER_EXTERNAL_HOSTNAME = os.getenv('RENDER_EXTERNAL_HOSTNAME')
+if RENDER_EXTERNAL_HOSTNAME:
+    ALLOWED_HOSTS.append(RENDER_EXTERNAL_HOSTNAME)
+
+# CSRF trusted origins for Render deployment
+CSRF_TRUSTED_ORIGINS = [
+    'https://*.onrender.com',
+]
 
 
 # Application definition

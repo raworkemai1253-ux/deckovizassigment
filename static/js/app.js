@@ -13,6 +13,8 @@
 let currentConversationId = null;
 let conversations = [];
 let isLoading = false;
+let currentMode = 'auto'; // 'auto', 'image', 'video'
+let recognition = null;
 
 // ─── DOM Elements ─────────────────────────────────────────────────────────
 const sidebar = document.getElementById('sidebar');
@@ -34,6 +36,11 @@ const uploadBtn = document.getElementById('uploadBtn');
 const imagePreview = document.getElementById('imagePreview');
 const previewImg = document.getElementById('previewImg');
 const previewClose = document.getElementById('previewClose');
+
+// New Elements
+const modeBtns = document.querySelectorAll('.mode-btn');
+const micBtn = document.getElementById('micBtn');
+
 
 // ─── API Helpers ──────────────────────────────────────────────────────────
 async function api(url, options = {}) {
@@ -165,6 +172,56 @@ clearChatBtn.addEventListener('click', () => {
     if (currentConversationId) deleteConversation(currentConversationId);
 });
 
+// ─── Mode Selection ─────────────────────────────────────────────────────
+modeBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+        // Remove active class from all
+        modeBtns.forEach(b => b.classList.remove('active'));
+        // Add to clicked
+        btn.classList.add('active');
+        // Set mode
+        currentMode = btn.getAttribute('data-mode');
+        console.log('Mode switched to:', currentMode);
+    });
+});
+
+
+// ─── Speech to Text ─────────────────────────────────────────────────────
+function setupSpeechRecognition() {
+    if ('webkitSpeechRecognition' in window) {
+        recognition = new webkitSpeechRecognition();
+        recognition.continuous = false;
+        recognition.interimResults = false;
+        recognition.lang = 'en-US';
+
+        recognition.onstart = () => {
+            micBtn.classList.add('listening');
+        };
+
+        recognition.onend = () => {
+            micBtn.classList.remove('listening');
+        };
+
+        recognition.onresult = (event) => {
+            const transcript = event.results[0][0].transcript;
+            messageInput.value += (messageInput.value ? ' ' : '') + transcript;
+            // Trigger input event to resize/enable send
+            messageInput.dispatchEvent(new Event('input'));
+        };
+
+        micBtn.addEventListener('click', () => {
+            if (micBtn.classList.contains('listening')) {
+                recognition.stop();
+            } else {
+                recognition.start();
+            }
+        });
+    } else {
+        if (micBtn) micBtn.style.display = 'none'; // Hide if not supported
+    }
+}
+
+
 // ─── Views ────────────────────────────────────────────────────────────────
 function showWelcome() {
     welcomeScreen.style.display = 'flex';
@@ -205,12 +262,25 @@ function appendMessage(msg, animate = true) {
         let gridHtml = `<div class="content-grid ${gridClass}">`;
 
         msg.generated_contents.forEach(gc => {
+            const isVideo = gc.content_type === 'video' ||
+                /\.(mp4|webm|mov)(\?|$)/i.test(gc.image_url);
+            const mediaHtml = isVideo
+                ? `<video src="${gc.image_url}" autoplay loop muted playsinline style="width:100%;aspect-ratio:16/9;object-fit:cover;display:block;border-radius:12px 12px 0 0;"></video>`
+                : `<img src="${gc.image_url}" alt="${escapeHtml(gc.title)}" loading="lazy">`;
+
             gridHtml += `
-                <div class="content-card" onclick="openLightbox('${gc.image_url}', '${escapeHtml(gc.title)}')">
-                    <img src="${gc.image_url}" alt="${escapeHtml(gc.title)}" loading="lazy">
+                <div class="content-card" onclick="selectImage('${gc.image_url}', this)">
+                    ${mediaHtml}
                     <div class="content-card-overlay">
                         <div class="content-card-title">${escapeHtml(gc.title)}</div>
-                        <div class="content-card-type">${gc.content_type}</div>
+                        <div class="content-card-actions">
+                            ${!isVideo ? `<button class="btn-icon-small" onclick="event.stopPropagation(); openLightbox('${gc.image_url}', '${escapeHtml(gc.title)}')" title="View full size">
+                                🔍
+                            </button>` : ''}
+                            <button class="btn-icon-small" onclick="event.stopPropagation(); downloadImage('${gc.image_url}', '${escapeHtml(gc.title)}')" title="Download">
+                                ⬇️
+                            </button>
+                        </div>
                     </div>
                 </div>
             `;
@@ -293,6 +363,29 @@ previewClose.addEventListener('click', () => {
     }
 });
 
+// ─── Selection / Refinement ──────────────────────────────────────────────
+let selectedImageUrl = null;
+
+function selectImage(url, cardElement) {
+    if (selectedImageUrl === url) {
+        // Deselect
+        selectedImageUrl = null;
+        cardElement.classList.remove('selected');
+        // Remove input hint
+        messageInput.placeholder = "Describe what you'd like to create...";
+    } else {
+        // Deselect others
+        document.querySelectorAll('.content-card').forEach(c => c.classList.remove('selected'));
+        // Select this
+        selectedImageUrl = url;
+        cardElement.classList.add('selected');
+        // Visual feedback
+        messageInput.placeholder = "Refine this image (e.g., 'make it darker')...";
+        messageInput.focus();
+    }
+}
+
+
 // ─── Sending Messages ────────────────────────────────────────────────────
 async function sendMessage() {
     const content = messageInput.value.trim();
@@ -316,16 +409,24 @@ async function sendMessage() {
         }
     }
 
-    // Clear input
+    // Clear flags but keep input/selection logic until sent
+    // Actually standard chat clears input immediately.
+
+    // UI Updates
     messageInput.value = '';
     messageInput.style.height = 'auto';
+    messageInput.placeholder = "Describe what you'd like to create...";
 
-    // Clear image
     if (imageFile) {
         imageInput.value = '';
         imagePreview.style.display = 'none';
         previewImg.src = '';
     }
+
+    // Clear selection visual but keep URL for sending
+    const currentRefinementUrl = selectedImageUrl;
+    selectedImageUrl = null;
+    document.querySelectorAll('.content-card').forEach(c => c.classList.remove('selected'));
 
     sendBtn.disabled = true;
     isLoading = true;
@@ -346,11 +447,14 @@ async function sendMessage() {
 
     try {
         let data;
+        // Construct payload including MODE & Refinement
         if (imageFile) {
             const formData = new FormData();
             formData.append('conversation_id', currentConversationId);
             formData.append('content', content);
             formData.append('image', imageFile);
+            formData.append('mode', currentMode);
+            if (currentRefinementUrl) formData.append('refinement_url', currentRefinementUrl);
 
             const response = await fetch('/api/messages/', {
                 method: 'POST',
@@ -362,11 +466,14 @@ async function sendMessage() {
             }
             data = await response.json();
         } else {
+            console.log("Sending mode:", currentMode);
             data = await api('/api/messages/', {
                 method: 'POST',
                 body: JSON.stringify({
                     conversation_id: currentConversationId,
                     content: content,
+                    mode: currentMode,
+                    refinement_url: currentRefinementUrl, // Send selection
                 }),
             });
         }
@@ -517,3 +624,25 @@ function scrollToBottom() {
 
 // ─── Init ────────────────────────────────────────────────────────────────
 loadConversations();
+setupSpeechRecognition();
+
+// ─── Download Image ──────────────────────────────────────────────────────
+async function downloadImage(url, title) {
+    try {
+        const response = await fetch(url);
+        const blob = await response.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        const ext = url.split('.').pop().split('?')[0] || 'png';
+        const safeName = (title || 'vizzy-image').replace(/[^a-z0-9]/gi, '_').substring(0, 40);
+        a.download = `${safeName}.${ext}`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(blobUrl);
+    } catch (err) {
+        // Fallback: open in new tab
+        window.open(url, '_blank');
+    }
+}
