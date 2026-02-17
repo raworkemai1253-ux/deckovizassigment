@@ -262,10 +262,11 @@ function appendMessage(msg, animate = true) {
         let gridHtml = `<div class="content-grid ${gridClass}">`;
 
         msg.generated_contents.forEach(gc => {
-            const isVideo = gc.content_type === 'video' ||
-                /\.(mp4|webm|mov)(\?|$)/i.test(gc.image_url);
-            const mediaHtml = isVideo
-                ? `<video src="${gc.image_url}" autoplay loop muted playsinline style="width:100%;aspect-ratio:16/9;object-fit:cover;display:block;border-radius:12px 12px 0 0;"></video>`
+            // Only use <video> for actual video files, not GIFs
+            const videoExtRegex = /\.(mp4|webm|mov)(\?|$)/i;
+            const isRealVideo = videoExtRegex.test(gc.image_url || '');
+            const mediaHtml = isRealVideo
+                ? `<video src="${gc.image_url}" autoplay loop muted playsinline controls style="width:100%;aspect-ratio:16/9;object-fit:cover;display:block;border-radius:12px 12px 0 0;"></video>`
                 : `<img src="${gc.image_url}" alt="${escapeHtml(gc.title)}" loading="lazy">`;
 
             gridHtml += `
@@ -274,7 +275,7 @@ function appendMessage(msg, animate = true) {
                     <div class="content-card-overlay">
                         <div class="content-card-title">${escapeHtml(gc.title)}</div>
                         <div class="content-card-actions">
-                            ${!isVideo ? `<button class="btn-icon-small" onclick="event.stopPropagation(); openLightbox('${gc.image_url}', '${escapeHtml(gc.title)}')" title="View full size">
+                            ${!isRealVideo ? `<button class="btn-icon-small" onclick="event.stopPropagation(); openLightbox('${gc.image_url}', '${escapeHtml(gc.title)}')" title="View full size">
                                 🔍
                             </button>` : ''}
                             <button class="btn-icon-small" onclick="event.stopPropagation(); downloadImage('${gc.image_url}', '${escapeHtml(gc.title)}')" title="Download">
