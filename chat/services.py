@@ -391,7 +391,7 @@ def _generate_replicate_video(prompt):
         print(f"DEBUG: Replicate — creating prediction...")
         resp = requests.post(create_url, headers=headers, json=payload, timeout=120)
 
-        if resp.status_code not in (200, 201):
+        if resp.status_code not in (200, 201, 202):
             print(f"DEBUG: Replicate create failed: {resp.status_code} - {resp.text[:200]}")
             return None
 
