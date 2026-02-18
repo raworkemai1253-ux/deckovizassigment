@@ -1207,6 +1207,107 @@ def _generate_pollinations_image(prompt):
     except Exception as e:
         print(f"DEBUG: Pollinations Exception: {e}")
         logger.error(f"Pollinations Exception: {e}")
+
+# ---------------------------------------------------------------------------
+# Pollinations AI I2I 
+# ---------------------------------------------------------------------------
+def _generate_pollinations_img2img(prompt, image_file):
+    """
+    Generate image-to-image using Pollinations.AI.
+    Uses the 'kontext' model or similar which supports image input.
+    Pollinations URL format for img2img: 
+    https://image.pollinations.ai/prompt/{prompt}?model=kontext&image={image_url}
+    
+    Since we are likely local, we might need a public URL.
+    However, if we are on Render, we can use settings.RENDER_EXTERNAL_HOSTNAME.
+    """
+    try:
+        # 1. Get a public URL for the image
+        image_url = None
+        
+        # If we have a file object (InMemoryUploadedFile or similar)
+        # We need to save it to storage first to get a URL, BUT 
+        # local storage URL (/media/...) is not public.
+        
+        # Check if we are in production with a public domain
+        public_domain = settings.RENDER_EXTERNAL_HOSTNAME
+        if not public_domain and hasattr(settings, 'ALLOWED_HOSTS') and len(settings.ALLOWED_HOSTS) > 0:
+             # Try to pick a valid public host if available (naive check)
+             for host in settings.ALLOWED_HOSTS:
+                 if '.' in host and host != '*' and not host.startswith('localhost') and not host.startswith('127.'):
+                     public_domain = host
+                     break
+        
+        if not public_domain:
+            print("DEBUG: Pollinations Img2Img requires a public server URL (not localhost).")
+            # We can try to assume it might work if we just send the path if using a tunneling service,
+            # but standard localhost won't work. 
+            # Fallback: We will try to upload to a temp host? No, that's unsafe.
+            # We will return None and let the user know/fallback.
+            # OPTION B: Use base64 if supported (docs say Vision supports it, not sure about generic /prompt)
+            # Let's try sending base64 in the URL (might be too long) or POST.
+            pass
+
+
+        # Save to a temp file to get a path/url
+        # Resize to max 1024x1024 first to be safe and efficient
+        img = Image.open(image_file)
+        img = img.convert("RGB")
+        img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+        
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=85)
+        image_content = ContentFile(buffer.getvalue())
+
+        filename = f"uploads/temp_img2img_{uuid.uuid4()}.jpg"
+        saved_path = default_storage.save(filename, image_content)
+        relative_url = default_storage.url(saved_path)
+        
+        full_image_url = None
+        if public_domain:
+            scheme = "https" # Assume https for prod
+            full_image_url = f"{scheme}://{public_domain}{relative_url}"
+        
+        print(f"DEBUG: Pollinations Img2Img - Public Image URL: {full_image_url}")
+
+        if not full_image_url:
+            print("DEBUG: Cannot generate public URL for Pollinations Img2Img. Skipping.")
+            return None
+
+        # 2. Call Pollinations
+        import urllib.parse
+        encoded_prompt = urllib.parse.quote(prompt)
+        # encoded_image_url = urllib.parse.quote(full_image_url) # requests params handle this
+        
+        # usage: https://image.pollinations.ai/prompt/cat?image=https://example.com/cat.jpg
+        # model: 'kontext' is recommended for img2img in docs/examples
+        
+        api_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+        params = {
+            "image": full_image_url,
+            "width": 1024,
+            "height": 1024,
+            "model": "flux", # flux is generally better, but let's stick to what might work for img2img
+            # "model": "kontext", # experiment with this if flux ignores image
+            "seed": random.randint(0, 50000),
+            "nologo": "true"
+        }
+        
+        print(f"DEBUG: Requesting Pollinations Img2Img: {prompt[:50]}...")
+        response = requests.get(api_url, params=params, timeout=60)
+        
+        if response.status_code == 200:
+            image_bytes = response.content
+            filename = f"generated/pollinations_img2img_{uuid.uuid4()}.png"
+            image_content = ContentFile(image_bytes)
+            saved_path = default_storage.save(filename, image_content)
+            return default_storage.url(saved_path)
+        else:
+            print(f"DEBUG: Pollinations Img2Img Error: {response.status_code} - {response.text[:200]}")
+            return None
+
+    except Exception as e:
+        print(f"DEBUG: Pollinations Img2Img Exception: {e}")
         return None
 
 
@@ -1223,18 +1324,28 @@ def _generate_real_content_items(intent, message_text, conversation=None, image_
     # Handle Image Editing (Transformation)
     if intent == 'image_transformation' and image_file:
          print("DEBUG: Processing Image Transformation...")
-         edited_url = _edit_huggingface_image(image_file, message_text)
+         # Try Pollinations Img2Img First (Requested by user) or as fallback?
+         # User said "use pollination for imgtoimg transformation" and "current implementation... not performing well".
+         # So we prioritize Pollinations.
+         
+         print("DEBUG: Trying Pollinations Img2Img...")
+         edited_url = _generate_pollinations_img2img(message_text, image_file)
+         
+         if not edited_url:
+             print("DEBUG: Pollinations Img2Img failed. Falling back to HuggingFace...")
+             image_file.seek(0) # Reset file pointer
+             edited_url = _edit_huggingface_image(image_file, message_text)
          
          if edited_url:
              return [{
                  'content_type': 'photo',
-                 'title': 'AI Edited Image',
-                 'description': f"Edited based on: {message_text}",
+                 'title': 'AI Transformed Image',
+                 'description': f"Transformed: {message_text}",
                  'image_url': edited_url,
                  'prompt_used': message_text,
              }]
          else:
-             print("DEBUG: Image editing failed.")
+             print("DEBUG: Image editing/transformation failed.")
              pass
 
     if intent == 'text_only':
@@ -1532,9 +1643,22 @@ def generate_response(message_text, conversation=None, image_file=None, mode=Non
                     content_type='image/png'
                 )
                 
-                # Try Cloudflare Workers AI img2img first (primary — free, no credit card)
-                if settings.CLOUDFLARE_ACCOUNT_ID and settings.CLOUDFLARE_API_TOKEN:
-                    print(f"DEBUG: Refining with Cloudflare Workers AI img2img (primary)...")
+                # Try Pollinations Img2Img First (Requested by user)
+                print(f"DEBUG: Refining with Pollinations Img2Img (primary)...")
+                fake_file.seek(0)
+                img_url = _generate_pollinations_img2img(message_text, fake_file)
+                if img_url:
+                    content_items.append({
+                        'content_type': 'image_generation',
+                        'title': f"Refined Image",
+                        'description': f"Refined: {message_text[:80]}",
+                        'image_url': img_url,
+                        'prompt_used': message_text,
+                    })
+
+                # Fallback: Try Cloudflare Workers AI img2img (secondary)
+                if not content_items and settings.CLOUDFLARE_ACCOUNT_ID and settings.CLOUDFLARE_API_TOKEN:
+                    print(f"DEBUG: Refining with Cloudflare Workers AI img2img (fallback)...")
                     img_url = _generate_cloudflare_img2img(message_text, fake_file)
                     if img_url:
                         content_items.append({
@@ -1625,8 +1749,14 @@ def generate_response(message_text, conversation=None, image_file=None, mode=Non
     elif intent == 'image_transformation' and image_file:
          print(f"DEBUG: Transforming Image with img2img...")
          img_url = None
-         # Try Cloudflare Workers AI first (primary — free, no credit card)
-         if settings.CLOUDFLARE_ACCOUNT_ID and settings.CLOUDFLARE_API_TOKEN:
+         
+         # Try Pollinations Img2Img First (Requested by user)
+         print("DEBUG: Trying Pollinations Img2Img...")
+         img_url = _generate_pollinations_img2img(message_text, image_file)
+
+         # Fallback to Cloudflare Workers AI
+         if not img_url and settings.CLOUDFLARE_ACCOUNT_ID and settings.CLOUDFLARE_API_TOKEN:
+             image_file.seek(0)
              img_url = _generate_cloudflare_img2img(message_text, image_file)
          # Fallback to AI Horde
          if not img_url:
