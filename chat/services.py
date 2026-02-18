@@ -505,6 +505,95 @@ def _generate_aihorde_img2img(prompt, image_file):
         return None
 
 # ---------------------------------------------------------------------------
+# AIML API Img2Img (Free tier — get API key at aimlapi.com)
+# ---------------------------------------------------------------------------
+def _generate_aimlapi_img2img(prompt, image_file):
+    """
+    Generate image-to-image using AIML API (flux/dev/image-to-image).
+    Free tier: signup at aimlapi.com for free API key + 50k credits.
+    Takes an image_url (we convert local file to base64 data URL).
+    """
+    if not settings.AIML_API_KEY:
+        print("DEBUG: AIML API key not configured — skipping")
+        return None
+    
+    try:
+        print(f"DEBUG: AIML API Img2Img — Processing base image...")
+        
+        # Read and resize input image
+        image_data = image_file.read()
+        img = Image.open(io.BytesIO(image_data))
+        img = img.convert("RGB")
+        img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+        
+        # Convert to base64 data URL (AIML API accepts data URLs for image_url)
+        buffered = io.BytesIO()
+        img.save(buffered, format="PNG")
+        img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+        data_url = f"data:image/png;base64,{img_b64}"
+        
+        api_url = "https://api.aimlapi.com/v1/images/generations"
+        headers = {
+            "Authorization": f"Bearer {settings.AIML_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        
+        payload = {
+            "model": "flux/dev/image-to-image",
+            "prompt": prompt,
+            "image_url": data_url,
+            "strength": 0.55,  # 0.0=identical, 1.0=completely new — balanced for editing
+            "num_images": 1,
+            "num_inference_steps": 28,
+            "guidance_scale": 3.5,
+        }
+        
+        print(f"DEBUG: AIML API — Requesting img2img: {prompt[:50]}...")
+        response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Response contains list of image objects with 'url' field
+            images = data.get('images', data.get('data', []))
+            if images:
+                result = images[0]
+                img_result_url = result.get('url', result.get('b64_json', ''))
+                
+                if img_result_url and img_result_url.startswith('http'):
+                    # Download from URL
+                    print(f"DEBUG: AIML API — Downloading result...")
+                    img_resp = requests.get(img_result_url, timeout=30)
+                    if img_resp.status_code == 200:
+                        filename = f"generated/aimlapi_img2img_{uuid.uuid4()}.png"
+                        image_content = ContentFile(img_resp.content)
+                        saved_path = default_storage.save(filename, image_content)
+                        result_url = default_storage.url(saved_path)
+                        print(f"DEBUG: AIML API — img2img complete: {result_url}")
+                        return result_url
+                elif img_result_url:
+                    # Base64 result
+                    image_bytes = base64.b64decode(img_result_url)
+                    filename = f"generated/aimlapi_img2img_{uuid.uuid4()}.png"
+                    image_content = ContentFile(image_bytes)
+                    saved_path = default_storage.save(filename, image_content)
+                    result_url = default_storage.url(saved_path)
+                    print(f"DEBUG: AIML API — img2img complete: {result_url}")
+                    return result_url
+            
+            print(f"DEBUG: AIML API — No images in response: {data}")
+            return None
+        else:
+            print(f"DEBUG: AIML API Error: {response.status_code} - {response.text[:300]}")
+            return None
+    
+    except Exception as e:
+        print(f"DEBUG: AIML API Img2Img Exception: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Replicate Video Generation (Direct HTTP API — no SDK needed)
 # ---------------------------------------------------------------------------
 def _generate_replicate_video(prompt):
@@ -1423,7 +1512,21 @@ def generate_response(message_text, conversation=None, image_file=None, mode=Non
                         'prompt_used': message_text,
                     })
                 
-                # Fallback 1: Try NVIDIA img2img
+                # Fallback 1: Try AIML API img2img (free tier)
+                if not content_items and settings.AIML_API_KEY:
+                    print(f"DEBUG: Refinement fallback — trying AIML API img2img...")
+                    fake_file.seek(0)
+                    img_url = _generate_aimlapi_img2img(message_text, fake_file)
+                    if img_url:
+                        content_items.append({
+                            'content_type': 'image_generation',
+                            'title': f"Refined Image",
+                            'description': f"Refined: {message_text[:80]}",
+                            'image_url': img_url,
+                            'prompt_used': message_text,
+                        })
+                
+                # Fallback 2: Try NVIDIA img2img
                 if not content_items and settings.NVIDIA_API_KEY:
                     print(f"DEBUG: Refinement fallback — trying NVIDIA SDXL img2img...")
                     fake_file.seek(0)
@@ -1485,12 +1588,16 @@ def generate_response(message_text, conversation=None, image_file=None, mode=Non
                 'prompt_used': message_text,
             })
     
-    # [IMAGE TRANSFORMATION via img2img]
+     # [IMAGE TRANSFORMATION via img2img]
     elif intent == 'image_transformation' and image_file:
          print(f"DEBUG: Transforming Image with img2img...")
          # Try AI Horde first (free, no API key needed)
          img_url = _generate_aihorde_img2img(message_text, image_file)
-         # Fallback to NVIDIA if AI Horde fails
+         # Fallback to AIML API
+         if not img_url and settings.AIML_API_KEY:
+             image_file.seek(0)
+             img_url = _generate_aimlapi_img2img(message_text, image_file)
+         # Fallback to NVIDIA
          if not img_url and settings.NVIDIA_API_KEY:
              image_file.seek(0)
              img_url = _generate_nvidia_image_to_image(message_text, image_file)
