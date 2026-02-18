@@ -495,6 +495,28 @@ body {
     color: var(--text-secondary);
 }
 
+/* ---------- User Uploaded Image Preview ---------- */
+.user-image-preview {
+    margin-top: 10px;
+    max-width: 280px;
+}
+
+.user-image-preview img {
+    width: 100%;
+    max-height: 200px;
+    object-fit: cover;
+    border-radius: 10px;
+    border: 1px solid var(--border-color);
+    cursor: pointer;
+    transition: all var(--transition-normal);
+}
+
+.user-image-preview img:hover {
+    border-color: var(--accent-primary);
+    box-shadow: var(--shadow-glow);
+    transform: scale(1.02);
+}
+
 /* ---------- Generated Content Grid ---------- */
 .content-grid {
     display: grid;

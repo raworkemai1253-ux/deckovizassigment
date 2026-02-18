@@ -143,6 +143,7 @@ def conversation_detail(request, conversation_id):
                 'role': msg.role,
                 'content': msg.content,
                 'message_type': msg.message_type,
+                'image_url': msg.image.url if msg.image else None,
                 'created_at': msg.created_at.isoformat(),
                 'generated_contents': [
                     {
@@ -284,6 +285,7 @@ def send_message(request):
             'role': 'user',
             'content': user_message.content,
             'message_type': user_message.message_type,
+            'image_url': user_message.image.url if user_message.image else (refinement_url or None),
             'created_at': user_message.created_at.isoformat(),
             'generated_contents': [],
         },

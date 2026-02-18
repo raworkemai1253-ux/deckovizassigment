@@ -255,6 +255,13 @@ function appendMessage(msg, animate = true) {
 
     let contentHtml = `<div class="message-content">${formatText(msg.content)}</div>`;
 
+    // Render user-uploaded image thumbnail
+    if (msg.image_url) {
+        contentHtml += `<div class="user-image-preview">
+            <img src="${msg.image_url}" alt="Uploaded image" loading="lazy" onclick="openLightbox('${msg.image_url}', 'Uploaded Image')">
+        </div>`;
+    }
+
     // Render generated content grid
     if (msg.generated_contents && msg.generated_contents.length > 0) {
         const count = msg.generated_contents.length;
@@ -413,6 +420,12 @@ async function sendMessage() {
     // Clear flags but keep input/selection logic until sent
     // Actually standard chat clears input immediately.
 
+    // Capture image data URL BEFORE clearing for immediate preview
+    let imageDataUrl = null;
+    if (imageFile) {
+        imageDataUrl = previewImg.src; // Grab from FileReader before we clear it
+    }
+
     // UI Updates
     messageInput.value = '';
     messageInput.style.height = 'auto';
@@ -432,11 +445,15 @@ async function sendMessage() {
     sendBtn.disabled = true;
     isLoading = true;
 
+    // For display: use uploaded image preview or refinement URL
+    const displayImageUrl = imageDataUrl || currentRefinementUrl || null;
+
     // Show user message immediately
     const tempUserMsg = {
         id: 'temp-user',
         role: 'user',
         content: content || (imageFile ? '[Image Uploaded]' : ''),
+        image_url: displayImageUrl,
         generated_contents: [],
     };
     appendMessage(tempUserMsg);

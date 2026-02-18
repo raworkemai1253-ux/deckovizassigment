@@ -308,24 +308,15 @@ def _generate_nvidia_image_to_image(prompt, image_file):
             "Accept": "application/json"
         }
         
-        # Docs for SDXL usually take 'image' or 'init_image' for img2img
-        # NVIDIA NIM for SDXL might use the same endpoint with an 'image' payload
-        # or a specific parameters structure.
-        # Based on research, it often uses 'text_prompts' + 'image' (b64).
-        
         payload = {
             "text_prompts": [{"text": prompt}],
-            "image": f"data:image/png;base64,{img_b64}", # standard data URI format often required
-            "cfg_scale": 7,
+            "init_image": img_b64,
+            "cfg_scale": 5,
             "seed": random.randint(0, 100000),
             "sampler": "K_DPM_2_ANCESTRAL",
             "steps": 25,
-            "strength": 0.75 # How much to change the image (0.0 - 1.0)
+            "strength": 0.4
         }
-        
-        # Note: If pure 'stable-diffusion-xl' endpoint doesn't support img2img, 
-        # we might need to check specific docs. But typically standard SDXL endpoints do.
-        # If it fails, we'll see a specific error.
         
         print(f"DEBUG: Requesting NVIDIA Img2Img: {prompt[:50]}...")
         response = requests.post(url, headers=headers, json=payload, timeout=60)
@@ -352,6 +343,166 @@ def _generate_nvidia_image_to_image(prompt, image_file):
         print(f"DEBUG: NVIDIA Img2Img Exception: {e}")
         return None
 
+
+# ---------------------------------------------------------------------------
+# AI Horde Img2Img (Free, No Signup, Community-Powered Stable Diffusion)
+# ---------------------------------------------------------------------------
+def _generate_aihorde_img2img(prompt, image_file):
+    """
+    Generate image-to-image using AI Horde (free, no API key required).
+    Uses community-powered Stable Diffusion workers.
+    Flow: POST /generate/async → poll /generate/status/{id} → download result.
+    """
+    import time as _time
+    
+    try:
+        print(f"DEBUG: AI Horde Img2Img — Processing base image...")
+        
+        # Read and resize input image
+        image_data = image_file.read()
+        img = Image.open(io.BytesIO(image_data))
+        img = img.convert("RGB")
+        
+        # AI Horde requires dimensions to be multiples of 64, max 1024x1024
+        w, h = img.size
+        max_dim = 512  # Keep small for faster processing on community workers
+        if w > h:
+            new_w = min(w, max_dim)
+            new_h = int(h * new_w / w)
+        else:
+            new_h = min(h, max_dim)
+            new_w = int(w * new_h / h)
+        # Round to nearest multiple of 64
+        new_w = max(64, (new_w // 64) * 64)
+        new_h = max(64, (new_h // 64) * 64)
+        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        
+        # Convert to webp base64 (AI Horde requires webp)
+        buffered = io.BytesIO()
+        img.save(buffered, format="WEBP", quality=90)
+        img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+        
+        # Step 1: Submit async generation request
+        api_url = "https://stablehorde.net/api/v2/generate/async"
+        headers = {
+            "apikey": "0000000000",  # Anonymous access
+            "Client-Agent": "VizzyChat:1.0:vizzy",
+            "Content-Type": "application/json",
+        }
+        
+        payload = {
+            "prompt": prompt,
+            "params": {
+                "sampler_name": "k_euler_a",
+                "cfg_scale": 7.0,
+                "denoising_strength": 0.45,  # 0.0=identical, 1.0=completely new
+                "height": new_h,
+                "width": new_w,
+                "steps": 25,
+                "n": 1,
+            },
+            "source_image": img_b64,
+            "source_processing": "img2img",
+            "nsfw": False,
+            "censor_nsfw": False,
+            "models": ["stable_diffusion"],
+            "r2": True,
+            "shared": True,  # Reduces kudos cost for anonymous users
+            "slow_workers": True,
+            "trusted_workers": False,
+        }
+        
+        print(f"DEBUG: AI Horde — Submitting img2img request: {prompt[:50]}...")
+        response = requests.post(api_url, headers=headers, json=payload, timeout=30)
+        
+        if response.status_code not in (200, 202):
+            print(f"DEBUG: AI Horde submit error: {response.status_code} - {response.text}")
+            return None
+        
+        data = response.json()
+        request_id = data.get('id')
+        if not request_id:
+            print(f"DEBUG: AI Horde — No request ID returned: {data}")
+            return None
+        
+        print(f"DEBUG: AI Horde — Request queued: {request_id}")
+        
+        # Step 2: Poll for completion (max 120 seconds)
+        status_url = f"https://stablehorde.net/api/v2/generate/status/{request_id}"
+        max_wait = 120
+        poll_interval = 3
+        elapsed = 0
+        
+        while elapsed < max_wait:
+            _time.sleep(poll_interval)
+            elapsed += poll_interval
+            
+            try:
+                status_resp = requests.get(status_url, headers={
+                    "Client-Agent": "VizzyChat:1.0:vizzy"
+                }, timeout=15)
+                
+                if status_resp.status_code != 200:
+                    print(f"DEBUG: AI Horde poll error: {status_resp.status_code}")
+                    continue
+                
+                status_data = status_resp.json()
+                
+                if status_data.get('faulted'):
+                    print(f"DEBUG: AI Horde — Request faulted")
+                    return None
+                
+                if status_data.get('done'):
+                    generations = status_data.get('generations', [])
+                    if generations:
+                        gen = generations[0]
+                        img_url = gen.get('img')
+                        
+                        if img_url and img_url.startswith('http'):
+                            # Download from R2 URL
+                            print(f"DEBUG: AI Horde — Downloading result from R2...")
+                            img_resp = requests.get(img_url, timeout=30)
+                            if img_resp.status_code == 200:
+                                filename = f"generated/aihorde_img2img_{uuid.uuid4()}.webp"
+                                image_content = ContentFile(img_resp.content)
+                                saved_path = default_storage.save(filename, image_content)
+                                result_url = default_storage.url(saved_path)
+                                print(f"DEBUG: AI Horde — img2img complete: {result_url}")
+                                return result_url
+                        elif img_url:
+                            # Base64 encoded result
+                            image_bytes = base64.b64decode(img_url)
+                            filename = f"generated/aihorde_img2img_{uuid.uuid4()}.webp"
+                            image_content = ContentFile(image_bytes)
+                            saved_path = default_storage.save(filename, image_content)
+                            result_url = default_storage.url(saved_path)
+                            print(f"DEBUG: AI Horde — img2img complete: {result_url}")
+                            return result_url
+                    
+                    print(f"DEBUG: AI Horde — Done but no generations returned")
+                    return None
+                
+                wait_time = status_data.get('wait_time', '?')
+                queue_pos = status_data.get('queue_position', '?')
+                print(f"DEBUG: AI Horde — Waiting... pos={queue_pos}, eta={wait_time}s, elapsed={elapsed}s")
+                
+            except requests.RequestException as poll_err:
+                print(f"DEBUG: AI Horde poll exception: {poll_err}")
+                continue
+        
+        print(f"DEBUG: AI Horde — Timed out after {max_wait}s")
+        # Cancel the request
+        try:
+            requests.delete(status_url, headers={"Client-Agent": "VizzyChat:1.0:vizzy"}, timeout=5)
+        except Exception:
+            pass
+        return None
+        
+    except Exception as e:
+        print(f"DEBUG: AI Horde Img2Img Exception: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 # ---------------------------------------------------------------------------
 # Replicate Video Generation (Direct HTTP API — no SDK needed)
@@ -1260,9 +1411,22 @@ def generate_response(message_text, conversation=None, image_file=None, mode=Non
                     content_type='image/png'
                 )
                 
-                # Try NVIDIA img2img first
-                if settings.NVIDIA_API_KEY:
-                    print(f"DEBUG: Refining with NVIDIA SDXL img2img...")
+                # Try AI Horde img2img first (free, no API key needed)
+                print(f"DEBUG: Refining with AI Horde img2img (free)...")
+                img_url = _generate_aihorde_img2img(message_text, fake_file)
+                if img_url:
+                    content_items.append({
+                        'content_type': 'image_generation',
+                        'title': f"Refined Image",
+                        'description': f"Refined: {message_text[:80]}",
+                        'image_url': img_url,
+                        'prompt_used': message_text,
+                    })
+                
+                # Fallback 1: Try NVIDIA img2img
+                if not content_items and settings.NVIDIA_API_KEY:
+                    print(f"DEBUG: Refinement fallback — trying NVIDIA SDXL img2img...")
+                    fake_file.seek(0)
                     img_url = _generate_nvidia_image_to_image(message_text, fake_file)
                     if img_url:
                         content_items.append({
@@ -1273,10 +1437,24 @@ def generate_response(message_text, conversation=None, image_file=None, mode=Non
                             'prompt_used': message_text,
                         })
                 
-                # Fallback: generate a new image with the combined prompt
+                # Fallback 2: Try HuggingFace InstructPix2Pix
+                if not content_items and settings.HUGGINGFACE_API_KEY:
+                    print(f"DEBUG: Refinement fallback — trying HuggingFace InstructPix2Pix...")
+                    fake_file.seek(0)
+                    edited_url = _edit_huggingface_image(fake_file, message_text)
+                    if edited_url:
+                        content_items.append({
+                            'content_type': 'image_generation',
+                            'title': f"Refined Image",
+                            'description': f"Refined: {message_text[:80]}",
+                            'image_url': edited_url,
+                            'prompt_used': message_text,
+                        })
+                
+                # Final fallback: generate a new image with the combined prompt
                 if not content_items:
                     print(f"DEBUG: Refinement fallback — generating new image with merged prompt")
-                    merged_prompt = f"{message_text}. Based on a previous image."
+                    merged_prompt = f"{message_text}, maintaining the same composition, colors, and subject as the original image"
                     content_items = _generate_real_content_items('image_generation', merged_prompt, conversation, None)
             else:
                 print(f"DEBUG: Refinement image not found at {file_path}")
@@ -1296,15 +1474,20 @@ def generate_response(message_text, conversation=None, image_file=None, mode=Non
                 'prompt_used': message_text,
             })
     
-    # [NVIDIA Image-to-Image (SDXL)]
-    elif intent == 'image_transformation' and settings.NVIDIA_API_KEY and image_file:
-         print(f"DEBUG: Transforming Image with NVIDIA SDXL...")
-         img_url = _generate_nvidia_image_to_image(message_text, image_file)
+    # [IMAGE TRANSFORMATION via img2img]
+    elif intent == 'image_transformation' and image_file:
+         print(f"DEBUG: Transforming Image with img2img...")
+         # Try AI Horde first (free, no API key needed)
+         img_url = _generate_aihorde_img2img(message_text, image_file)
+         # Fallback to NVIDIA if AI Horde fails
+         if not img_url and settings.NVIDIA_API_KEY:
+             image_file.seek(0)
+             img_url = _generate_nvidia_image_to_image(message_text, image_file)
          if img_url:
              content_items.append({
                 'content_type': 'image_transformation',
-                'title': "Remixed Image — SDXL",
-                'description': "Transformed using NVIDIA Stable Diffusion XL.",
+                'title': "Remixed Image",
+                'description': "Transformed using img2img AI.",
                 'image_url': img_url,
                 'prompt_used': message_text,
             })
