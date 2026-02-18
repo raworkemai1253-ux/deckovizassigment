@@ -538,11 +538,20 @@ def _generate_cloudflare_img2img(prompt, image_file):
             "Content-Type": "application/json",
         }
         
+        # Prepare payload with tuned parameters for better quality
+        # strength: 0.0=identical, 1.0=completely new. 0.7 gives good balance for "refining"
+        # guidance: 7.5 is standard for Stable Diffusion
+        # num_steps: 20 (Max limit for Cloudflare Free Tier img2img)
+        
+        # Add quality boosters to prompt if not present
+        if "high quality" not in prompt.lower():
+            prompt = f"{prompt}, high quality, detailed, sharp focus"
+            
         payload = {
             "prompt": prompt,
             "image_b64": img_b64,
-            "strength": 0.55,
-            "num_steps": 20,
+            "strength": 0.7, 
+            "num_steps": 20, 
             "guidance": 7.5,
         }
         
