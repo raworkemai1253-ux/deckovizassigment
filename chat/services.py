@@ -413,7 +413,7 @@ def _generate_aihorde_img2img(prompt, image_file):
         }
         
         print(f"DEBUG: AI Horde — Submitting img2img request: {prompt[:50]}...")
-        response = requests.post(api_url, headers=headers, json=payload, timeout=30)
+        response = requests.post(api_url, headers=headers, json=payload, timeout=10)
         
         if response.status_code not in (200, 202):
             print(f"DEBUG: AI Horde submit error: {response.status_code} - {response.text}")
@@ -1451,11 +1451,22 @@ def generate_response(message_text, conversation=None, image_file=None, mode=Non
                             'prompt_used': message_text,
                         })
                 
-                # Final fallback: generate a new image with the combined prompt
+                # Final fallback: use Pollinations to generate a new image with a descriptive prompt
                 if not content_items:
-                    print(f"DEBUG: Refinement fallback — generating new image with merged prompt")
-                    merged_prompt = f"{message_text}, maintaining the same composition, colors, and subject as the original image"
-                    content_items = _generate_real_content_items('image_generation', merged_prompt, conversation, None)
+                    print(f"DEBUG: Refinement fallback — using Pollinations text-to-image")
+                    merged_prompt = f"{message_text}, maintaining the same composition, colors, and subject as the original image, photorealistic, high quality"
+                    poll_url = _generate_pollinations_image(merged_prompt)
+                    if poll_url:
+                        content_items.append({
+                            'content_type': 'image_generation',
+                            'title': f"Refined Image",
+                            'description': f"Refined (via text prompt): {message_text[:80]}",
+                            'image_url': poll_url,
+                            'prompt_used': message_text,
+                        })
+                    else:
+                        # Last resort: try regular content generation
+                        content_items = _generate_real_content_items('image_generation', merged_prompt, conversation, None)
             else:
                 print(f"DEBUG: Refinement image not found at {file_path}")
         except Exception as e:
@@ -1483,6 +1494,9 @@ def generate_response(message_text, conversation=None, image_file=None, mode=Non
          if not img_url and settings.NVIDIA_API_KEY:
              image_file.seek(0)
              img_url = _generate_nvidia_image_to_image(message_text, image_file)
+         # Fallback to Pollinations (text-to-image, always works)
+         if not img_url:
+             img_url = _generate_pollinations_image(f"{message_text}, photorealistic, high quality")
          if img_url:
              content_items.append({
                 'content_type': 'image_transformation',
