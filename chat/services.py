@@ -1500,23 +1500,24 @@ def generate_response(message_text, conversation=None, image_file=None, mode=Non
                     content_type='image/png'
                 )
                 
-                # Try AI Horde img2img first (free, no API key needed)
-                print(f"DEBUG: Refining with AI Horde img2img (free)...")
-                img_url = _generate_aihorde_img2img(message_text, fake_file)
-                if img_url:
-                    content_items.append({
-                        'content_type': 'image_generation',
-                        'title': f"Refined Image",
-                        'description': f"Refined: {message_text[:80]}",
-                        'image_url': img_url,
-                        'prompt_used': message_text,
-                    })
-                
-                # Fallback 1: Try AIML API img2img (free tier)
-                if not content_items and settings.AIML_API_KEY:
-                    print(f"DEBUG: Refinement fallback — trying AIML API img2img...")
-                    fake_file.seek(0)
+                # Try AIML API img2img first (primary — free tier)
+                if settings.AIML_API_KEY:
+                    print(f"DEBUG: Refining with AIML API img2img (primary)...")
                     img_url = _generate_aimlapi_img2img(message_text, fake_file)
+                    if img_url:
+                        content_items.append({
+                            'content_type': 'image_generation',
+                            'title': f"Refined Image",
+                            'description': f"Refined: {message_text[:80]}",
+                            'image_url': img_url,
+                            'prompt_used': message_text,
+                        })
+                
+                # Fallback 1: Try AI Horde img2img (free, no key)
+                if not content_items:
+                    print(f"DEBUG: Refinement fallback — trying AI Horde img2img...")
+                    fake_file.seek(0)
+                    img_url = _generate_aihorde_img2img(message_text, fake_file)
                     if img_url:
                         content_items.append({
                             'content_type': 'image_generation',
@@ -1591,12 +1592,14 @@ def generate_response(message_text, conversation=None, image_file=None, mode=Non
      # [IMAGE TRANSFORMATION via img2img]
     elif intent == 'image_transformation' and image_file:
          print(f"DEBUG: Transforming Image with img2img...")
-         # Try AI Horde first (free, no API key needed)
-         img_url = _generate_aihorde_img2img(message_text, image_file)
-         # Fallback to AIML API
-         if not img_url and settings.AIML_API_KEY:
-             image_file.seek(0)
+         # Try AIML API first (primary — free tier)
+         img_url = None
+         if settings.AIML_API_KEY:
              img_url = _generate_aimlapi_img2img(message_text, image_file)
+         # Fallback to AI Horde
+         if not img_url:
+             image_file.seek(0)
+             img_url = _generate_aihorde_img2img(message_text, image_file)
          # Fallback to NVIDIA
          if not img_url and settings.NVIDIA_API_KEY:
              image_file.seek(0)
