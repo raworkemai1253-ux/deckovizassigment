@@ -505,89 +505,112 @@ def _generate_aihorde_img2img(prompt, image_file):
         return None
 
 # ---------------------------------------------------------------------------
-# AIML API Img2Img (Free tier — get API key at aimlapi.com)
+# Cloudflare Workers AI Img2Img (Free — no credit card needed)
 # ---------------------------------------------------------------------------
-def _generate_aimlapi_img2img(prompt, image_file):
+def _generate_cloudflare_img2img(prompt, image_file):
     """
-    Generate image-to-image using AIML API (flux/dev/image-to-image).
-    Free tier: signup at aimlapi.com for free API key + 50k credits.
-    Takes an image_url (we convert local file to base64 data URL).
+    Generate image-to-image using Cloudflare Workers AI.
+    Model: @cf/runwayml/stable-diffusion-v1-5-img2img
+    Free tier: 10,000 neurons/day, no credit card required.
+    Synchronous API — returns image bytes directly (no polling).
     """
-    if not settings.AIML_API_KEY:
-        print("DEBUG: AIML API key not configured — skipping")
+    if not settings.CLOUDFLARE_ACCOUNT_ID or not settings.CLOUDFLARE_API_TOKEN:
+        print("DEBUG: Cloudflare Workers AI not configured — skipping")
         return None
     
     try:
-        print(f"DEBUG: AIML API Img2Img — Processing base image...")
+        print(f"DEBUG: Cloudflare Workers AI Img2Img — Processing base image...")
         
         # Read and resize input image
         image_data = image_file.read()
         img = Image.open(io.BytesIO(image_data))
         img = img.convert("RGB")
-        img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+        img.thumbnail((512, 512), Image.Resampling.LANCZOS)
         
-        # Convert to base64 data URL (AIML API accepts data URLs for image_url)
+        # Convert to base64 string
         buffered = io.BytesIO()
         img.save(buffered, format="PNG")
         img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-        data_url = f"data:image/png;base64,{img_b64}"
         
-        api_url = "https://api.aimlapi.com/v1/images/generations"
+        api_url = f"https://api.cloudflare.com/client/v4/accounts/{settings.CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/runwayml/stable-diffusion-v1-5-img2img"
         headers = {
-            "Authorization": f"Bearer {settings.AIML_API_KEY}",
+            "Authorization": f"Bearer {settings.CLOUDFLARE_API_TOKEN}",
             "Content-Type": "application/json",
         }
         
         payload = {
-            "model": "flux/dev/image-to-image",
             "prompt": prompt,
-            "image_url": data_url,
-            "strength": 0.55,  # 0.0=identical, 1.0=completely new — balanced for editing
-            "num_images": 1,
-            "num_inference_steps": 28,
-            "guidance_scale": 3.5,
+            "image_b64": img_b64,
+            "strength": 0.55,
+            "num_steps": 20,
+            "guidance": 7.5,
         }
         
-        print(f"DEBUG: AIML API — Requesting img2img: {prompt[:50]}...")
+        print(f"DEBUG: Cloudflare Workers AI — Requesting img2img: {prompt[:50]}...")
         response = requests.post(api_url, headers=headers, json=payload, timeout=60)
         
+        print(f"DEBUG: Cloudflare Status: {response.status_code}")
+        print(f"DEBUG: Cloudflare Content-Type: {response.headers.get('content-type', 'N/A')}")
+        print(f"DEBUG: Cloudflare Content-Length: {len(response.content) if response.content else 0} bytes")
+        
         if response.status_code == 200:
-            data = response.json()
-            # Response contains list of image objects with 'url' field
-            images = data.get('images', data.get('data', []))
-            if images:
-                result = images[0]
-                img_result_url = result.get('url', result.get('b64_json', ''))
-                
-                if img_result_url and img_result_url.startswith('http'):
-                    # Download from URL
-                    print(f"DEBUG: AIML API — Downloading result...")
-                    img_resp = requests.get(img_result_url, timeout=30)
-                    if img_resp.status_code == 200:
-                        filename = f"generated/aimlapi_img2img_{uuid.uuid4()}.png"
-                        image_content = ContentFile(img_resp.content)
-                        saved_path = default_storage.save(filename, image_content)
-                        result_url = default_storage.url(saved_path)
-                        print(f"DEBUG: AIML API — img2img complete: {result_url}")
-                        return result_url
-                elif img_result_url:
-                    # Base64 result
-                    image_bytes = base64.b64decode(img_result_url)
-                    filename = f"generated/aimlapi_img2img_{uuid.uuid4()}.png"
-                    image_content = ContentFile(image_bytes)
-                    saved_path = default_storage.save(filename, image_content)
-                    result_url = default_storage.url(saved_path)
-                    print(f"DEBUG: AIML API — img2img complete: {result_url}")
-                    return result_url
+            content_type = response.headers.get('content-type', '')
             
-            print(f"DEBUG: AIML API — No images in response: {data}")
-            return None
+            if 'image' in content_type:
+                # Direct image response
+                if not response.content:
+                    print(f"DEBUG: Cloudflare Workers AI — Received empty image content!")
+                    return None
+                    
+                filename = f"generated/cloudflare_img2img_{uuid.uuid4()}.png"
+                image_content = ContentFile(response.content)
+                saved_path = default_storage.save(filename, image_content)
+                result_url = default_storage.url(saved_path)
+                print(f"DEBUG: Cloudflare Workers AI — img2img complete: {result_url} ({len(response.content)} bytes)")
+                return result_url
+            else:
+                # JSON response (might contain base64 or URL)
+                try:
+                    data = response.json()
+                    print(f"DEBUG: Cloudflare Workers AI — JSON response keys: {list(data.keys())}")
+                    
+                    if data.get('result'):
+                        img_result = data['result']
+                        if isinstance(img_result, str):
+                            # It might be base64
+                            try:
+                                image_bytes = base64.b64decode(img_result)
+                                if not image_bytes:
+                                    print(f"DEBUG: Cloudflare Workers AI — Decoded base64 is empty!")
+                                    return None
+                                    
+                                filename = f"generated/cloudflare_img2img_{uuid.uuid4()}.png"
+                                image_content = ContentFile(image_bytes)
+                                saved_path = default_storage.save(filename, image_content)
+                                result_url = default_storage.url(saved_path)
+                                print(f"DEBUG: Cloudflare Workers AI — img2img complete: {result_url} ({len(image_bytes)} bytes)")
+                                return result_url
+                            except Exception as b64e:
+                                print(f"DEBUG: Cloudflare Workers AI — Base64 decode error: {b64e}")
+                                return None
+                    
+                    if data.get('success') is False:
+                        print(f"DEBUG: Cloudflare Workers AI — Success=False. Errors: {data.get('errors')}")
+                        return None
+                        
+                except Exception as json_e:
+                    print(f"DEBUG: Cloudflare Workers AI — JSON parsing error: {json_e}")
+                    print(f"DEBUG: Response text (first 200 chars): {response.text[:200]}")
+                
+                print(f"DEBUG: Cloudflare Workers AI — Unexpected response format")
+                return None
         else:
-            print(f"DEBUG: AIML API Error: {response.status_code} - {response.text[:300]}")
+            error_text = response.text[:300] if response.text else 'No response body'
+            print(f"DEBUG: Cloudflare Workers AI Error: {response.status_code} - {error_text}")
             return None
     
     except Exception as e:
-        print(f"DEBUG: AIML API Img2Img Exception: {e}")
+        print(f"DEBUG: Cloudflare Workers AI Img2Img Exception: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -1500,10 +1523,10 @@ def generate_response(message_text, conversation=None, image_file=None, mode=Non
                     content_type='image/png'
                 )
                 
-                # Try AIML API img2img first (primary — free tier)
-                if settings.AIML_API_KEY:
-                    print(f"DEBUG: Refining with AIML API img2img (primary)...")
-                    img_url = _generate_aimlapi_img2img(message_text, fake_file)
+                # Try Cloudflare Workers AI img2img first (primary — free, no credit card)
+                if settings.CLOUDFLARE_ACCOUNT_ID and settings.CLOUDFLARE_API_TOKEN:
+                    print(f"DEBUG: Refining with Cloudflare Workers AI img2img (primary)...")
+                    img_url = _generate_cloudflare_img2img(message_text, fake_file)
                     if img_url:
                         content_items.append({
                             'content_type': 'image_generation',
@@ -1592,10 +1615,10 @@ def generate_response(message_text, conversation=None, image_file=None, mode=Non
      # [IMAGE TRANSFORMATION via img2img]
     elif intent == 'image_transformation' and image_file:
          print(f"DEBUG: Transforming Image with img2img...")
-         # Try AIML API first (primary — free tier)
          img_url = None
-         if settings.AIML_API_KEY:
-             img_url = _generate_aimlapi_img2img(message_text, image_file)
+         # Try Cloudflare Workers AI first (primary — free, no credit card)
+         if settings.CLOUDFLARE_ACCOUNT_ID and settings.CLOUDFLARE_API_TOKEN:
+             img_url = _generate_cloudflare_img2img(message_text, image_file)
          # Fallback to AI Horde
          if not img_url:
              image_file.seek(0)

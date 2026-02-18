@@ -38,8 +38,11 @@ HUGGINGFACE_API_KEY = os.getenv('HUGGINGFACE_API_KEY', '')
 # NVIDIA API Key
 NVIDIA_API_KEY = os.getenv('NVIDIA_API_KEY', '')
 
-# AIML API Key (free img2img via flux — get at aimlapi.com)
-AIML_API_KEY = os.getenv('AIML_API_KEY', '')
+
+
+# Cloudflare Workers AI (free img2img — no credit card needed)
+CLOUDFLARE_ACCOUNT_ID = os.getenv('CLOUDFLARE_ACCOUNT_ID', '')
+CLOUDFLARE_API_TOKEN = os.getenv('CLOUDFLARE_API_TOKEN', '')
 
 # Replicate API Token (for video generation)
 REPLICATE_API_TOKEN = os.getenv('REPLICATE_API_TOKEN', '')
