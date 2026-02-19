@@ -278,466 +278,145 @@ def _generate_nvidia_image(prompt):
         return None
 
 
-def _generate_nvidia_image_to_image(prompt, image_file):
+
+# ---------------------------------------------------------------------------
+# Colab Self-Hosted InstructPix2Pix (Image Editing via ngrok API)
+# ---------------------------------------------------------------------------
+def _generate_colab_img2img(prompt, image_file):
     """
-    Generate image from image using NVIDIA NIM (SDXL Refiner/Img2Img).
+    Edit image using self-hosted InstructPix2Pix on Google Colab.
+    Requires COLAB_API_URL and COLAB_API_KEY in settings.
+    Returns: URL to the saved edited image, or None.
     """
-    if not settings.NVIDIA_API_KEY:
+    if not settings.COLAB_API_URL or not settings.COLAB_API_KEY:
+        print("DEBUG: Colab API not configured — skipping")
         return None
 
     try:
-        print(f"DEBUG: NVIDIA Img2Img - Processing base image...")
-        
-        # Process input image
-        # image_file is an UploadedFile object or similar from Django
+        print(f"DEBUG: Colab InstructPix2Pix — Processing base image...")
+
+        # Read and resize input image
         image_data = image_file.read()
-        
-        # Resize to max 1024x1024 to fit API limits/costs and convert to base64
         img = Image.open(io.BytesIO(image_data))
         img = img.convert("RGB")
         img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
-        
+
+        # Convert to base64
         buffered = io.BytesIO()
         img.save(buffered, format="PNG")
         img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-        url = "https://ai.api.nvidia.com/v1/genai/stabilityai/stable-diffusion-xl"
+        api_url = f"{settings.COLAB_API_URL.rstrip('/')}/edit"
         headers = {
-            "Authorization": f"Bearer {settings.NVIDIA_API_KEY}",
+            "X-API-Key": settings.COLAB_API_KEY,
             "Content-Type": "application/json",
-            "Accept": "application/json"
         }
-        
+
         payload = {
-            "text_prompts": [{"text": prompt}],
-            "init_image": img_b64,
-            "cfg_scale": 5,
-            "seed": random.randint(0, 100000),
-            "sampler": "K_DPM_2_ANCESTRAL",
-            "steps": 25,
-            "strength": 0.4
+            "image_b64": img_b64,
+            "prompt": prompt,
+            "steps": 20,
+            "guidance": 7.5,
+            "image_guidance": 1.5,
         }
-        
-        print(f"DEBUG: Requesting NVIDIA Img2Img: {prompt[:50]}...")
-        response = requests.post(url, headers=headers, json=payload, timeout=60)
-        
+
+        print(f"DEBUG: Colab InstructPix2Pix — Requesting edit: {prompt[:50]}...")
+        response = requests.post(api_url, headers=headers, json=payload, timeout=120)
+
         if response.status_code == 200:
             data = response.json()
-            artifacts = data.get('artifacts', [])
-            if artifacts:
-                image_b64 = artifacts[0].get('base64')
-                if image_b64:
-                    image_bytes = base64.b64decode(image_b64)
-                    filename = f"generated/nvidia_img2img_{uuid.uuid4()}.png"
+            if data.get("status") == "success" and data.get("image_b64"):
+                image_bytes = base64.b64decode(data["image_b64"])
+                if image_bytes:
+                    filename = f"generated/colab_edit_{uuid.uuid4()}.png"
                     image_content = ContentFile(image_bytes)
                     saved_path = default_storage.save(filename, image_content)
-                    return default_storage.url(saved_path)
-            
-            print(f"DEBUG: NVIDIA Img2Img Response malformed: {data.keys()}")
+                    result_url = default_storage.url(saved_path)
+                    elapsed = data.get("elapsed_seconds", "?")
+                    print(f"DEBUG: Colab InstructPix2Pix — edit complete: {result_url} ({elapsed}s)")
+                    return result_url
+
+            print(f"DEBUG: Colab InstructPix2Pix — Unexpected response: {data.get('error', 'unknown')}")
             return None
         else:
-            print(f"DEBUG: NVIDIA Img2Img Error: {response.status_code} - {response.text}")
+            print(f"DEBUG: Colab InstructPix2Pix Error: {response.status_code} - {response.text[:300]}")
             return None
 
-    except Exception as e:
-        print(f"DEBUG: NVIDIA Img2Img Exception: {e}")
+    except requests.exceptions.Timeout:
+        print("DEBUG: Colab InstructPix2Pix — Request timed out (120s)")
         return None
-
-
-# ---------------------------------------------------------------------------
-# AI Horde Img2Img (Free, No Signup, Community-Powered Stable Diffusion)
-# ---------------------------------------------------------------------------
-def _generate_aihorde_img2img(prompt, image_file):
-    """
-    Generate image-to-image using AI Horde (free, no API key required).
-    Uses community-powered Stable Diffusion workers.
-    Flow: POST /generate/async → poll /generate/status/{id} → download result.
-    """
-    import time as _time
-    
-    try:
-        print(f"DEBUG: AI Horde Img2Img — Processing base image...")
-        
-        # Read and resize input image
-        image_data = image_file.read()
-        img = Image.open(io.BytesIO(image_data))
-        img = img.convert("RGB")
-        
-        # AI Horde requires dimensions to be multiples of 64, max 1024x1024
-        w, h = img.size
-        max_dim = 512  # Keep small for faster processing on community workers
-        if w > h:
-            new_w = min(w, max_dim)
-            new_h = int(h * new_w / w)
-        else:
-            new_h = min(h, max_dim)
-            new_w = int(w * new_h / h)
-        # Round to nearest multiple of 64
-        new_w = max(64, (new_w // 64) * 64)
-        new_h = max(64, (new_h // 64) * 64)
-        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        
-        # Convert to webp base64 (AI Horde requires webp)
-        buffered = io.BytesIO()
-        img.save(buffered, format="WEBP", quality=90)
-        img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-        
-        # Step 1: Submit async generation request
-        api_url = "https://stablehorde.net/api/v2/generate/async"
-        headers = {
-            "apikey": "0000000000",  # Anonymous access
-            "Client-Agent": "VizzyChat:1.0:vizzy",
-            "Content-Type": "application/json",
-        }
-        
-        payload = {
-            "prompt": prompt,
-            "params": {
-                "sampler_name": "k_euler_a",
-                "cfg_scale": 7.0,
-                "denoising_strength": 0.45,  # 0.0=identical, 1.0=completely new
-                "height": new_h,
-                "width": new_w,
-                "steps": 25,
-                "n": 1,
-            },
-            "source_image": img_b64,
-            "source_processing": "img2img",
-            "nsfw": False,
-            "censor_nsfw": False,
-            "models": ["stable_diffusion"],
-            "r2": True,
-            "shared": True,  # Reduces kudos cost for anonymous users
-            "slow_workers": True,
-            "trusted_workers": False,
-        }
-        
-        print(f"DEBUG: AI Horde — Submitting img2img request: {prompt[:50]}...")
-        response = requests.post(api_url, headers=headers, json=payload, timeout=10)
-        
-        if response.status_code not in (200, 202):
-            print(f"DEBUG: AI Horde submit error: {response.status_code} - {response.text}")
-            return None
-        
-        data = response.json()
-        request_id = data.get('id')
-        if not request_id:
-            print(f"DEBUG: AI Horde — No request ID returned: {data}")
-            return None
-        
-        print(f"DEBUG: AI Horde — Request queued: {request_id}")
-        
-        # Step 2: Poll for completion (max 120 seconds)
-        status_url = f"https://stablehorde.net/api/v2/generate/status/{request_id}"
-        max_wait = 120
-        poll_interval = 3
-        elapsed = 0
-        
-        while elapsed < max_wait:
-            _time.sleep(poll_interval)
-            elapsed += poll_interval
-            
-            try:
-                status_resp = requests.get(status_url, headers={
-                    "Client-Agent": "VizzyChat:1.0:vizzy"
-                }, timeout=15)
-                
-                if status_resp.status_code != 200:
-                    print(f"DEBUG: AI Horde poll error: {status_resp.status_code}")
-                    continue
-                
-                status_data = status_resp.json()
-                
-                if status_data.get('faulted'):
-                    print(f"DEBUG: AI Horde — Request faulted")
-                    return None
-                
-                if status_data.get('done'):
-                    generations = status_data.get('generations', [])
-                    if generations:
-                        gen = generations[0]
-                        img_url = gen.get('img')
-                        
-                        if img_url and img_url.startswith('http'):
-                            # Download from R2 URL
-                            print(f"DEBUG: AI Horde — Downloading result from R2...")
-                            img_resp = requests.get(img_url, timeout=30)
-                            if img_resp.status_code == 200:
-                                filename = f"generated/aihorde_img2img_{uuid.uuid4()}.webp"
-                                image_content = ContentFile(img_resp.content)
-                                saved_path = default_storage.save(filename, image_content)
-                                result_url = default_storage.url(saved_path)
-                                print(f"DEBUG: AI Horde — img2img complete: {result_url}")
-                                return result_url
-                        elif img_url:
-                            # Base64 encoded result
-                            image_bytes = base64.b64decode(img_url)
-                            filename = f"generated/aihorde_img2img_{uuid.uuid4()}.webp"
-                            image_content = ContentFile(image_bytes)
-                            saved_path = default_storage.save(filename, image_content)
-                            result_url = default_storage.url(saved_path)
-                            print(f"DEBUG: AI Horde — img2img complete: {result_url}")
-                            return result_url
-                    
-                    print(f"DEBUG: AI Horde — Done but no generations returned")
-                    return None
-                
-                wait_time = status_data.get('wait_time', '?')
-                queue_pos = status_data.get('queue_position', '?')
-                print(f"DEBUG: AI Horde — Waiting... pos={queue_pos}, eta={wait_time}s, elapsed={elapsed}s")
-                
-            except requests.RequestException as poll_err:
-                print(f"DEBUG: AI Horde poll exception: {poll_err}")
-                continue
-        
-        print(f"DEBUG: AI Horde — Timed out after {max_wait}s")
-        # Cancel the request
-        try:
-            requests.delete(status_url, headers={"Client-Agent": "VizzyChat:1.0:vizzy"}, timeout=5)
-        except Exception:
-            pass
+    except requests.exceptions.ConnectionError:
+        print("DEBUG: Colab InstructPix2Pix — Connection failed (Colab may be offline)")
         return None
-        
     except Exception as e:
-        print(f"DEBUG: AI Horde Img2Img Exception: {e}")
+        print(f"DEBUG: Colab InstructPix2Pix Exception: {e}")
         import traceback
         traceback.print_exc()
         return None
 
+
 # ---------------------------------------------------------------------------
-# Cloudflare Workers AI Img2Img (Free — no credit card needed)
+# Colab Self-Hosted AnimateDiff (Text-to-Video via ngrok API)
 # ---------------------------------------------------------------------------
-def _generate_cloudflare_img2img(prompt, image_file):
+def _generate_colab_video(prompt):
     """
-    Generate image-to-image using Cloudflare Workers AI.
-    Model: @cf/runwayml/stable-diffusion-v1-5-img2img
-    Free tier: 10,000 neurons/day, no credit card required.
-    Synchronous API — returns image bytes directly (no polling).
+    Generate video using self-hosted AnimateDiff on Google Colab.
+    Requires COLAB_VIDEO_API_URL and COLAB_VIDEO_API_KEY in settings.
+    Returns: URL to the saved GIF/video file, or None.
     """
-    if not settings.CLOUDFLARE_ACCOUNT_ID or not settings.CLOUDFLARE_API_TOKEN:
-        print("DEBUG: Cloudflare Workers AI not configured — skipping")
+    if not settings.COLAB_VIDEO_API_URL or not settings.COLAB_VIDEO_API_KEY:
+        print("DEBUG: Colab Video API not configured — skipping")
         return None
-    
+
     try:
-        print(f"DEBUG: Cloudflare Workers AI Img2Img — Processing base image...")
-        
-        # Read and resize input image
-        image_data = image_file.read()
-        img = Image.open(io.BytesIO(image_data))
-        img = img.convert("RGB")
-        img.thumbnail((512, 512), Image.Resampling.LANCZOS)
-        
-        # Convert to base64 string
-        buffered = io.BytesIO()
-        img.save(buffered, format="PNG")
-        img_b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-        
-        api_url = f"https://api.cloudflare.com/client/v4/accounts/{settings.CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/runwayml/stable-diffusion-v1-5-img2img"
+        api_url = f"{settings.COLAB_VIDEO_API_URL.rstrip('/')}/generate"
         headers = {
-            "Authorization": f"Bearer {settings.CLOUDFLARE_API_TOKEN}",
+            "X-API-Key": settings.COLAB_VIDEO_API_KEY,
             "Content-Type": "application/json",
         }
-        
-        # Prepare payload with tuned parameters for better quality
-        # strength: 0.0=identical, 1.0=completely new. 0.7 gives good balance for "refining"
-        # guidance: 7.5 is standard for Stable Diffusion
-        # num_steps: 20 (Max limit for Cloudflare Free Tier img2img)
-        
-        # Add quality boosters to prompt if not present
-        if "high quality" not in prompt.lower():
-            prompt = f"{prompt}, high quality, detailed, sharp focus"
-            
+
         payload = {
             "prompt": prompt,
-            "image_b64": img_b64,
-            "strength": 0.7, 
-            "num_steps": 20, 
+            "negative_prompt": "blurry, low quality, distorted, ugly",
+            "steps": 25,
             "guidance": 7.5,
+            "num_frames": 16,
+            "output_format": "gif",
         }
-        
-        print(f"DEBUG: Cloudflare Workers AI — Requesting img2img: {prompt[:50]}...")
-        response = requests.post(api_url, headers=headers, json=payload, timeout=60)
-        
-        print(f"DEBUG: Cloudflare Status: {response.status_code}")
-        print(f"DEBUG: Cloudflare Content-Type: {response.headers.get('content-type', 'N/A')}")
-        print(f"DEBUG: Cloudflare Content-Length: {len(response.content) if response.content else 0} bytes")
-        
+
+        print(f"DEBUG: Colab AnimateDiff — Generating video: {prompt[:50]}...")
+        response = requests.post(api_url, headers=headers, json=payload, timeout=180)
+
         if response.status_code == 200:
-            content_type = response.headers.get('content-type', '')
-            
-            if 'image' in content_type:
-                # Direct image response
-                if not response.content:
-                    print(f"DEBUG: Cloudflare Workers AI — Received empty image content!")
-                    return None
-                    
-                filename = f"generated/cloudflare_img2img_{uuid.uuid4()}.png"
-                image_content = ContentFile(response.content)
-                saved_path = default_storage.save(filename, image_content)
-                result_url = default_storage.url(saved_path)
-                print(f"DEBUG: Cloudflare Workers AI — img2img complete: {result_url} ({len(response.content)} bytes)")
-                return result_url
-            else:
-                # JSON response (might contain base64 or URL)
-                try:
-                    data = response.json()
-                    print(f"DEBUG: Cloudflare Workers AI — JSON response keys: {list(data.keys())}")
-                    
-                    if data.get('result'):
-                        img_result = data['result']
-                        if isinstance(img_result, str):
-                            # It might be base64
-                            try:
-                                image_bytes = base64.b64decode(img_result)
-                                if not image_bytes:
-                                    print(f"DEBUG: Cloudflare Workers AI — Decoded base64 is empty!")
-                                    return None
-                                    
-                                filename = f"generated/cloudflare_img2img_{uuid.uuid4()}.png"
-                                image_content = ContentFile(image_bytes)
-                                saved_path = default_storage.save(filename, image_content)
-                                result_url = default_storage.url(saved_path)
-                                print(f"DEBUG: Cloudflare Workers AI — img2img complete: {result_url} ({len(image_bytes)} bytes)")
-                                return result_url
-                            except Exception as b64e:
-                                print(f"DEBUG: Cloudflare Workers AI — Base64 decode error: {b64e}")
-                                return None
-                    
-                    if data.get('success') is False:
-                        print(f"DEBUG: Cloudflare Workers AI — Success=False. Errors: {data.get('errors')}")
-                        return None
-                        
-                except Exception as json_e:
-                    print(f"DEBUG: Cloudflare Workers AI — JSON parsing error: {json_e}")
-                    print(f"DEBUG: Response text (first 200 chars): {response.text[:200]}")
-                
-                print(f"DEBUG: Cloudflare Workers AI — Unexpected response format")
-                return None
+            data = response.json()
+            if data.get("status") == "success" and data.get("video_b64"):
+                video_bytes = base64.b64decode(data["video_b64"])
+                if video_bytes:
+                    fmt = data.get("format", "gif")
+                    filename = f"generated/colab_video_{uuid.uuid4().hex[:8]}.{fmt}"
+                    saved_path = default_storage.save(filename, ContentFile(video_bytes))
+                    result_url = default_storage.url(saved_path)
+                    elapsed = data.get("elapsed_seconds", "?")
+                    print(f"DEBUG: Colab AnimateDiff — video complete: {result_url} ({elapsed}s)")
+                    return result_url
+
+            print(f"DEBUG: Colab AnimateDiff — Unexpected response: {data.get('error', 'unknown')}")
+            return None
         else:
-            error_text = response.text[:300] if response.text else 'No response body'
-            print(f"DEBUG: Cloudflare Workers AI Error: {response.status_code} - {error_text}")
+            print(f"DEBUG: Colab AnimateDiff Error: {response.status_code} - {response.text[:300]}")
             return None
-    
+
+    except requests.exceptions.Timeout:
+        print("DEBUG: Colab AnimateDiff — Request timed out (180s)")
+        return None
+    except requests.exceptions.ConnectionError:
+        print("DEBUG: Colab AnimateDiff — Connection failed (Colab may be offline)")
+        return None
     except Exception as e:
-        print(f"DEBUG: Cloudflare Workers AI Img2Img Exception: {e}")
+        print(f"DEBUG: Colab AnimateDiff Exception: {e}")
         import traceback
         traceback.print_exc()
         return None
-
-
-# ---------------------------------------------------------------------------
-# Replicate Video Generation (Direct HTTP API — no SDK needed)
-# ---------------------------------------------------------------------------
-def _generate_replicate_video(prompt):
-    """
-    Generate video using Replicate HTTP API (minimax/video-01).
-    Uses direct HTTP calls instead of the replicate SDK to avoid
-    Pydantic V1 incompatibility with Python 3.14.
-    Returns: URL to the saved video file, or None.
-    """
-    if not settings.REPLICATE_API_TOKEN:
-        print("DEBUG: Replicate API token not configured")
-        return None
-
-    try:
-        import time as _time
-
-        api_token = settings.REPLICATE_API_TOKEN
-        headers = {
-            "Authorization": f"Bearer {api_token}",
-            "Content-Type": "application/json",
-            "Prefer": "wait",  # Tells Replicate to wait up to 60s before returning
-        }
-
-        print(f"DEBUG: Replicate Video — generating for: '{prompt[:60]}'...")
-
-        # Step 1: Create prediction via HTTP API
-        create_url = "https://api.replicate.com/v1/models/minimax/video-01/predictions"
-        payload = {
-            "input": {
-                "prompt": prompt,
-                "prompt_optimizer": True,
-            }
-        }
-
-        print(f"DEBUG: Replicate — creating prediction...")
-        resp = requests.post(create_url, headers=headers, json=payload, timeout=120)
-
-        if resp.status_code not in (200, 201, 202):
-            print(f"DEBUG: Replicate create failed: {resp.status_code} - {resp.text[:200]}")
-            return None
-
-        prediction = resp.json()
-        pred_id = prediction.get("id")
-        status = prediction.get("status")
-        print(f"DEBUG: Replicate — prediction {pred_id}, status: {status}")
-
-        # Step 2: Poll for completion (if not already done via Prefer: wait)
-        poll_url = f"https://api.replicate.com/v1/predictions/{pred_id}"
-        poll_headers = {
-            "Authorization": f"Bearer {api_token}",
-        }
-
-        max_wait = 300  # 5 minutes max
-        waited = 0
-        while status not in ("succeeded", "failed", "canceled") and waited < max_wait:
-            _time.sleep(5)
-            waited += 5
-            poll_resp = requests.get(poll_url, headers=poll_headers, timeout=30)
-            if poll_resp.status_code == 200:
-                prediction = poll_resp.json()
-                status = prediction.get("status")
-                print(f"DEBUG: Replicate — polling... status: {status} ({waited}s)")
-            else:
-                print(f"DEBUG: Replicate poll error: {poll_resp.status_code}")
-                break
-
-        if status != "succeeded":
-            error = prediction.get("error", "Unknown error")
-            print(f"DEBUG: Replicate prediction failed: {status} — {error}")
-            return None
-
-        # Step 3: Get output URL
-        output = prediction.get("output")
-        video_url = None
-
-        if isinstance(output, str):
-            video_url = output
-        elif isinstance(output, list) and len(output) > 0:
-            video_url = output[0] if isinstance(output[0], str) else str(output[0])
-        elif isinstance(output, dict):
-            video_url = output.get("url") or output.get("video")
-
-        if not video_url or not video_url.startswith("http"):
-            print(f"DEBUG: Replicate — unexpected output format: {output}")
-            return None
-
-        print(f"DEBUG: Replicate Video — downloading from: {video_url[:80]}...")
-
-        # Step 4: Download and save locally
-        dl_resp = requests.get(video_url, timeout=120)
-        if dl_resp.status_code != 200:
-            print(f"DEBUG: Replicate download failed: {dl_resp.status_code}")
-            return None
-
-        video_data = dl_resp.content
-
-        ext = "mp4"
-        if ".webm" in video_url:
-            ext = "webm"
-
-        filename = f"generated/replicate_video_{uuid.uuid4().hex[:8]}.{ext}"
-        saved_path = default_storage.save(filename, ContentFile(video_data))
-        local_url = f"{settings.MEDIA_URL}{saved_path}"
-        print(f"DEBUG: Replicate Video saved: {local_url}")
-        return local_url
-
-    except Exception as e:
-        print(f"DEBUG: Replicate Video Exception: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
 
 # ---------------------------------------------------------------------------
 # Product Mockup (Composite Approach)
@@ -1113,58 +792,6 @@ def _generate_imagen_images_batch(prompt, count=1, aspect_ratio='1:1'):
         return []
 
 
-def _edit_huggingface_image(image_file, prompt):
-    """
-    Edit an image using Hugging Face Inference API (InstructPix2Pix).
-    """
-    if not settings.HUGGINGFACE_API_KEY:
-        return None
-
-    api_url = "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-xl-base-1.0" # SDXL isn't img2img edit strictly, but let's assume it works or swap to instruct-pix2pix
-    # Better model for editing: "timbrooks/instruct-pix2pix"
-    api_url = "https://router.huggingface.co/hf-inference/models/timbrooks/instruct-pix2pix"
-
-    headers = {"Authorization": f"Bearer {settings.HUGGINGFACE_API_KEY}"}
-
-    try:
-        print(f"DEBUG: Requesting Image Edit: {prompt[:50]}...")
-        
-        image_file.seek(0)
-        img_bytes = image_file.read()
-        b64_img = base64.b64encode(img_bytes).decode('utf-8')
-        
-        payload = {
-            "inputs": b64_img,
-            "parameters": {
-                "prompt": prompt,
-                "negative_prompt": "blurry, low quality, distorted",
-                # instruct-pix2pix specific params
-                "image_guidance_scale": 1.5,
-            }
-        }
-
-        print(f"DEBUG: Sending img2img request to {api_url}...")
-        response = requests.post(api_url, headers=headers, json=payload, timeout=90)
-
-        if response.status_code == 200:
-            image_bytes = response.content
-            filename = f"generated/edited_{uuid.uuid4()}.png"
-            image_content = ContentFile(image_bytes)
-            saved_path = default_storage.save(filename, image_content)
-            return default_storage.url(saved_path)
-        else:
-            print(f"DEBUG: Hugging Face Edit Error: {response.status_code} - {response.text}")
-            logger.error(f"Hugging Face Edit Error: {response.status_code} - {response.text}")
-            return None
-
-    except Exception as e:
-        print(f"DEBUG: Hugging Face Edit Exception: {e}")
-        logger.error(f"Hugging Face Edit Exception: {e}")
-        return None
-
-
-
-
 
 def _generate_real_content_items(intent, message_text, conversation=None, image_file=None):
     """Generate REAL content items using Imagen 3 or Hugging Face."""
@@ -1482,58 +1109,16 @@ def generate_response(message_text, conversation=None, image_file=None, mode=Non
                     content_type='image/png'
                 )
                 
-                # Fallback: Try Cloudflare Workers AI img2img (primary)
-                if not content_items and settings.CLOUDFLARE_ACCOUNT_ID and settings.CLOUDFLARE_API_TOKEN:
-                    print(f"DEBUG: Refining with Cloudflare Workers AI img2img...")
-                    img_url = _generate_cloudflare_img2img(message_text, fake_file)
+                # Use Colab InstructPix2Pix for refinement
+                if not content_items and settings.COLAB_API_URL:
+                    print(f"DEBUG: Refining with Colab InstructPix2Pix...")
+                    img_url = _generate_colab_img2img(message_text, fake_file)
                     if img_url:
                         content_items.append({
                             'content_type': 'image_generation',
                             'title': f"Refined Image",
                             'description': f"Refined: {message_text[:80]}",
                             'image_url': img_url,
-                            'prompt_used': message_text,
-                        })
-                
-                # Fallback 1: Try AI Horde img2img (free, no key)
-                if not content_items:
-                    print(f"DEBUG: Refinement fallback — trying AI Horde img2img...")
-                    fake_file.seek(0)
-                    img_url = _generate_aihorde_img2img(message_text, fake_file)
-                    if img_url:
-                        content_items.append({
-                            'content_type': 'image_generation',
-                            'title': f"Refined Image",
-                            'description': f"Refined: {message_text[:80]}",
-                            'image_url': img_url,
-                            'prompt_used': message_text,
-                        })
-                
-                # Fallback 2: Try NVIDIA img2img
-                if not content_items and settings.NVIDIA_API_KEY:
-                    print(f"DEBUG: Refinement fallback — trying NVIDIA SDXL img2img...")
-                    fake_file.seek(0)
-                    img_url = _generate_nvidia_image_to_image(message_text, fake_file)
-                    if img_url:
-                        content_items.append({
-                            'content_type': 'image_generation',
-                            'title': f"Refined Image",
-                            'description': f"Refined: {message_text[:80]}",
-                            'image_url': img_url,
-                            'prompt_used': message_text,
-                        })
-                
-                # Fallback 2: Try HuggingFace InstructPix2Pix
-                if not content_items and settings.HUGGINGFACE_API_KEY:
-                    print(f"DEBUG: Refinement fallback — trying HuggingFace InstructPix2Pix...")
-                    fake_file.seek(0)
-                    edited_url = _edit_huggingface_image(fake_file, message_text)
-                    if edited_url:
-                        content_items.append({
-                            'content_type': 'image_generation',
-                            'title': f"Refined Image",
-                            'description': f"Refined: {message_text[:80]}",
-                            'image_url': edited_url,
                             'prompt_used': message_text,
                         })
                 
@@ -1542,10 +1127,15 @@ def generate_response(message_text, conversation=None, image_file=None, mode=Non
         except Exception as e:
             print(f"DEBUG: Refinement error: {e}")
     
-    # [VIDEO GENERATION via Replicate]
-    elif intent == 'video_loop' and settings.REPLICATE_API_TOKEN:
-        print(f"DEBUG: Generating Video with Replicate...")
-        video_url = _generate_replicate_video(message_text)
+    # [VIDEO GENERATION — Colab AnimateDiff]
+    elif intent == 'video_loop':
+        video_url = None
+
+        # Colab AnimateDiff (self-hosted, free)
+        if settings.COLAB_VIDEO_API_URL:
+            print(f"DEBUG: Generating Video with Colab AnimateDiff...")
+            video_url = _generate_colab_video(message_text)
+
         if video_url:
              content_items.append({
                 'content_type': 'video',
@@ -1555,24 +1145,14 @@ def generate_response(message_text, conversation=None, image_file=None, mode=Non
                 'prompt_used': message_text,
             })
     
-     # [IMAGE TRANSFORMATION via img2img]
+     # [IMAGE TRANSFORMATION — Colab InstructPix2Pix]
     elif intent == 'image_transformation' and image_file:
-         print(f"DEBUG: Transforming Image with img2img...")
+         print(f"DEBUG: Transforming Image with Colab InstructPix2Pix...")
          img_url = None
          
-         # Try Cloudflare Workers AI Img2Img First
-         if settings.CLOUDFLARE_ACCOUNT_ID and settings.CLOUDFLARE_API_TOKEN:
-             img_url = _generate_cloudflare_img2img(message_text, image_file)
-         
-         # Fallback to AI Horde
-         if not img_url:
-             image_file.seek(0)
-             img_url = _generate_aihorde_img2img(message_text, image_file)
-         
-         # Fallback to NVIDIA
-         if not img_url and settings.NVIDIA_API_KEY:
-             image_file.seek(0)
-             img_url = _generate_nvidia_image_to_image(message_text, image_file)
+         # Use Colab InstructPix2Pix
+         if settings.COLAB_API_URL:
+             img_url = _generate_colab_img2img(message_text, image_file)
          
          if img_url:
              content_items.append({

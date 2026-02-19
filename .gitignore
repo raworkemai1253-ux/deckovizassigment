@@ -30,3 +30,6 @@ test_*.py
 debug_*.py
 models_output.txt
 full_log.txt
+
+# Colab / Jupyter notebooks
+*.ipynb

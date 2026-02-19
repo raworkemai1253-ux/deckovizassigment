@@ -47,6 +47,14 @@ CLOUDFLARE_API_TOKEN = os.getenv('CLOUDFLARE_API_TOKEN', '')
 # Replicate API Token (for video generation)
 REPLICATE_API_TOKEN = os.getenv('REPLICATE_API_TOKEN', '')
 
+# Colab Self-Hosted Model API (InstructPix2Pix for image editing)
+COLAB_API_URL = os.getenv('COLAB_API_URL', '')  # ngrok URL from Colab notebook
+COLAB_API_KEY = os.getenv('COLAB_API_KEY', '')  # API key set in Colab notebook
+
+# Colab Self-Hosted Video API (AnimateDiff for text-to-video)
+COLAB_VIDEO_API_URL = os.getenv('COLAB_VIDEO_API_URL', '')
+COLAB_VIDEO_API_KEY = os.getenv('COLAB_VIDEO_API_KEY', '')
+
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
 
 # Render sets RENDER_EXTERNAL_HOSTNAME
