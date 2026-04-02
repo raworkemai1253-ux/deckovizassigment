@@ -867,12 +867,17 @@ def _generate_real_content_items(intent, message_text, conversation=None, image_
 
     # Priority: NVIDIA NIM -> Google Imagen -> Hugging Face -> Pollinations
     if settings.NVIDIA_API_KEY:
-         print(f"DEBUG: Generating {count} images with NVIDIA NIM...")
-         for i in range(count):
-             prompt_var = enhanced_prompt + f" variation {i+1}"
-             url = _generate_nvidia_image(prompt_var)
-             if url:
-                 image_urls.append(url)
+         print(f"DEBUG: Generating {count} images with NVIDIA NIM (concurrent)...")
+         import concurrent.futures
+         with concurrent.futures.ThreadPoolExecutor(max_workers=count) as executor:
+             futures = []
+             for i in range(count):
+                 prompt_var = enhanced_prompt + f" variation {i+1}"
+                 futures.append(executor.submit(_generate_nvidia_image, prompt_var))
+             for future in concurrent.futures.as_completed(futures):
+                 url = future.result()
+                 if url:
+                     image_urls.append(url)
     
     if not image_urls:
         image_urls = _generate_imagen_images_batch(enhanced_prompt, count=count, aspect_ratio=aspect_ratio)
